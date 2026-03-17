@@ -51,6 +51,77 @@ pipecat-core
 | Deepgram   | STT           | `deepgram`   |
 | ElevenLabs | TTS           | `elevenlabs` |
 
+## Getting Started
+
+Add the crates you need to your `Cargo.toml`:
+
+```toml
+[dependencies]
+pipecat-core = { path = "crates/pipecat-core" }
+pipecat-pipeline = { path = "crates/pipecat-pipeline" }
+pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs"] }
+pipecat-context = { path = "crates/pipecat-context" }
+```
+
+### Implementing a Processor
+
+Processors are the building blocks of a pipeline. Implement the `FrameProcessor` trait to handle or transform frames:
+
+```rust
+use async_trait::async_trait;
+use pipecat_core::frame::*;
+use pipecat_core::processor::*;
+
+struct UpperCaseProcessor {
+    base: ProcessorBase,
+}
+
+impl UpperCaseProcessor {
+    fn new() -> Self {
+        Self { base: ProcessorBase::new("UpperCase") }
+    }
+}
+
+#[async_trait]
+impl FrameProcessor for UpperCaseProcessor {
+    fn name(&self) -> &str { self.base.name() }
+    fn id(&self) -> u64 { self.base.id() }
+
+    async fn process_frame(
+        &mut self,
+        envelope: FrameEnvelope,
+        direction: Direction,
+        ctx: &ProcessorContext,
+    ) -> Result<()> {
+        match &envelope.frame {
+            Frame::Text(t) => {
+                ctx.send_downstream(Frame::Text(TextFrame::new(t.text.to_uppercase()))).await?;
+            }
+            _ => ctx.push_frame(envelope, direction).await?,
+        }
+        Ok(())
+    }
+}
+```
+
+### Building a Pipeline
+
+Chain processors together into a pipeline and run it:
+
+```rust
+use pipecat_pipeline::Pipeline;
+
+let pipeline = Pipeline::new(vec![
+    Box::new(stt_service),
+    Box::new(user_aggregator),
+    Box::new(llm_service),
+    Box::new(tts_service),
+    Box::new(assistant_aggregator),
+]);
+```
+
+A typical voice agent pipeline flows: **Transport In → STT → User Aggregator → LLM → TTS → Assistant Aggregator → Transport Out**.
+
 ## Building
 
 ```bash
