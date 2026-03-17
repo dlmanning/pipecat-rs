@@ -56,7 +56,7 @@ impl Default for PipelineParams {
         Self {
             audio_in_sample_rate: 16000,
             audio_out_sample_rate: 24000,
-            allow_interruptions: false,
+            allow_interruptions: true,
             enable_metrics: false,
             enable_usage_metrics: false,
             report_only_initial_ttfb: false,
@@ -150,7 +150,7 @@ pub struct PipelineTask {
     user_pipeline: Option<Box<dyn FrameProcessor>>,
     params: PipelineParams,
     observer: Option<Arc<dyn PipelineObserver>>,
-    push_tx: mpsc::Sender<Frame>,
+    pub(crate) push_tx: mpsc::Sender<Frame>,
     push_rx: Option<mpsc::Receiver<Frame>>,
     started: Arc<Notify>,
     ended: Arc<Notify>,
@@ -212,7 +212,7 @@ impl PipelineTask {
         self
     }
 
-    /// Register a callback fired on fatal errors from the pipeline.
+    /// Register a callback fired on errors (fatal and non-fatal) from the pipeline.
     pub fn on_pipeline_error<F, Fut>(mut self, f: F) -> Self
     where
         F: Fn(ErrorFrame) -> Fut + Send + Sync + 'static,
@@ -357,6 +357,9 @@ impl PipelineTask {
                         }
                         Frame::Cancel(_) => {
                             debug!("PipelineTask: CancelFrame reached sink");
+                            if let Some(ref cb) = on_finished {
+                                cb().await;
+                            }
                             ended.notify_waiters();
                             break;
                         }
@@ -385,14 +388,14 @@ impl PipelineTask {
                 while let Some(envelope) = source_up_rx.recv().await {
                     match envelope.frame {
                         Frame::Error(ref e) => {
+                            if let Some(ref cb) = on_error {
+                                cb(e.clone()).await;
+                            }
                             if e.fatal {
                                 error!(
                                     "PipelineTask: fatal error from {}: {}",
                                     e.source_processor, e.error
                                 );
-                                if let Some(ref cb) = on_error {
-                                    cb(e.clone()).await;
-                                }
                                 push_tx
                                     .send(Frame::Cancel(CancelFrame::default()))
                                     .await
@@ -882,6 +885,113 @@ mod tests {
         assert!(
             finished_flag.load(Ordering::SeqCst),
             "on_finished should fire"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_fires_finished_callback() {
+        let finished_flag = Arc::new(AtomicBool::new(false));
+        let ff = Arc::clone(&finished_flag);
+
+        let pipeline = Pipeline::new(vec![Box::new(PassthroughProcessor::new())]);
+        let mut task = PipelineTask::new(
+            Box::new(pipeline),
+            PipelineParams {
+                enable_heartbeats: false,
+                ..Default::default()
+            },
+        )
+        .on_pipeline_finished(move || {
+            let ff = Arc::clone(&ff);
+            async move {
+                ff.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let push_tx = task.push_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            push_tx
+                .send(Frame::Cancel(CancelFrame::default()))
+                .await
+                .ok();
+        });
+
+        task.run().await.unwrap();
+
+        assert!(
+            finished_flag.load(Ordering::SeqCst),
+            "on_finished should fire on CancelFrame"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_fatal_error_fires_callback() {
+        let error_flag = Arc::new(AtomicBool::new(false));
+        let ef = Arc::clone(&error_flag);
+
+        struct NonFatalErrorProcessor(ProcessorBase);
+        impl NonFatalErrorProcessor {
+            fn new() -> Self {
+                Self(ProcessorBase::new("NonFatalError"))
+            }
+        }
+        #[async_trait]
+        impl FrameProcessor for NonFatalErrorProcessor {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn id(&self) -> u64 {
+                self.0.id()
+            }
+            async fn process_frame(
+                &mut self,
+                envelope: FrameEnvelope,
+                direction: Direction,
+                ctx: &ProcessorContext,
+            ) {
+                if matches!(&envelope.frame, Frame::Text(_)) {
+                    ctx.push_error("non-fatal!", false).await.ok();
+                } else {
+                    ctx.push_frame(envelope, direction).await.ok();
+                }
+            }
+        }
+
+        let pipeline = Pipeline::new(vec![Box::new(NonFatalErrorProcessor::new())]);
+        let mut task = PipelineTask::new(
+            Box::new(pipeline),
+            PipelineParams {
+                enable_heartbeats: false,
+                ..Default::default()
+            },
+        )
+        .on_pipeline_error(move |_e| {
+            let ef = Arc::clone(&ef);
+            async move {
+                ef.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let push_tx = task.push_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            push_tx
+                .send(Frame::Text(TextFrame::new("trigger")))
+                .await
+                .ok();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            push_tx
+                .send(Frame::Cancel(CancelFrame::default()))
+                .await
+                .ok();
+        });
+
+        task.run().await.unwrap();
+
+        assert!(
+            error_flag.load(Ordering::SeqCst),
+            "on_error should fire for non-fatal errors"
         );
     }
 

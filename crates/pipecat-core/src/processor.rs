@@ -303,6 +303,13 @@ pub trait FrameProcessor: Send + Sync {
         ctx: &ProcessorContext,
     );
 
+    /// Called once before the processor starts receiving frames.
+    /// Override to perform one-time initialization: open connections,
+    /// load models, allocate buffers, etc. Default is a no-op.
+    ///
+    /// Called by `ProcessorNode::run()` before entering the event loop.
+    async fn setup(&mut self) {}
+
     /// Called when the ProcessorNode shuts down (after Cancel, or when channels
     /// close). Override to release resources: close connections, flush buffers,
     /// cancel background tasks, etc. Default is a no-op.

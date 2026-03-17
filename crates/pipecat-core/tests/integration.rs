@@ -874,3 +874,93 @@ async fn push_tts_usage_sends_frame() {
         other => panic!("expected MetricsFrame, got {other}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// setup() called before any frames are processed
+// ---------------------------------------------------------------------------
+
+struct SetupTracker {
+    base: ProcessorBase,
+    setup_called: Arc<std::sync::atomic::AtomicBool>,
+    frames_before_setup: Arc<std::sync::atomic::AtomicU32>,
+    setup_done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SetupTracker {
+    fn new() -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+        let setup_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            Self {
+                base: ProcessorBase::new("SetupTracker"),
+                setup_called: setup_called.clone(),
+                frames_before_setup: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                setup_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            setup_called,
+        )
+    }
+}
+
+#[async_trait]
+impl FrameProcessor for SetupTracker {
+    fn name(&self) -> &str {
+        self.base.name()
+    }
+    fn id(&self) -> u64 {
+        self.base.id()
+    }
+    async fn setup(&mut self) {
+        self.setup_called.store(true, Ordering::SeqCst);
+        self.setup_done.store(true, Ordering::SeqCst);
+    }
+    async fn process_frame(
+        &mut self,
+        envelope: FrameEnvelope,
+        direction: Direction,
+        ctx: &ProcessorContext,
+    ) {
+        if !self.setup_done.load(Ordering::SeqCst) {
+            self.frames_before_setup.fetch_add(1, Ordering::SeqCst);
+        }
+        ctx.push_frame(envelope, direction).await.ok();
+    }
+}
+
+#[tokio::test]
+async fn setup_called_before_frames() {
+    let (tracker, setup_called) = SetupTracker::new();
+    let frames_before_setup = tracker.frames_before_setup.clone();
+    let (node, handle, _down_rx, _up_rx) = make_node(Box::new(tracker));
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_and_settle(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    send_and_settle(
+        &handle,
+        Frame::Text(TextFrame::new("hello")),
+        Direction::Downstream,
+    )
+    .await;
+    send_and_settle(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+
+    assert!(
+        setup_called.load(Ordering::SeqCst),
+        "setup() should have been called"
+    );
+    assert_eq!(
+        frames_before_setup.load(Ordering::SeqCst),
+        0,
+        "no frames should be processed before setup()"
+    );
+}

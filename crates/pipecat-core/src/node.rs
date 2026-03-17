@@ -238,6 +238,8 @@ impl ProcessorNode {
             "ProcessorNode starting"
         );
 
+        self.processor.setup().await;
+
         loop {
             // 1. Process pending frames first (survivors of interruption drain).
             //    Only process if started and not paused — same rules as normal channel.
