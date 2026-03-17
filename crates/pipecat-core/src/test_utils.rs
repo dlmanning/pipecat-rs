@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::error::Result;
 use crate::frame::*;
@@ -342,13 +343,200 @@ impl FrameProcessor for FailingProcessor {
 }
 
 // ---------------------------------------------------------------------------
+// FrameCollector — deterministic frame collection for tests
+// ---------------------------------------------------------------------------
+
+/// Collects frames from a channel in a background task, providing deterministic
+/// wait methods that replace the racy `sleep` + `drain_rx` pattern.
+///
+/// # Usage
+///
+/// ```ignore
+/// let (node, handle, down_rx, _up_rx) = make_node(Box::new(processor));
+/// let down = FrameCollector::spawn(down_rx);
+/// let run = tokio::spawn(async move { node.run().await });
+///
+/// send_frame(&handle, Frame::Start(StartFrame::default()), Direction::Downstream).await;
+/// send_frame(&handle, Frame::Text(TextFrame::new("hello")), Direction::Downstream).await;
+/// send_frame(&handle, Frame::Cancel(CancelFrame::default()), Direction::Downstream).await;
+///
+/// down.wait_for_frame("Cancel").await;
+/// assert_eq!(down.frame_names(), vec!["Start", "Text", "Cancel"]);
+/// ```
+pub struct FrameCollector {
+    inner: Arc<Mutex<Vec<FrameEnvelope>>>,
+    count_rx: watch::Receiver<usize>,
+    _count_tx: Arc<watch::Sender<usize>>,
+    _task: JoinHandle<()>,
+}
+
+impl FrameCollector {
+    /// Spawn a background task that receives frames and stores them.
+    /// Takes ownership of the receiver.
+    pub fn spawn(mut rx: mpsc::Receiver<FrameEnvelope>) -> Self {
+        let inner = Arc::new(Mutex::new(Vec::<FrameEnvelope>::new()));
+        let (count_tx, count_rx) = watch::channel(0usize);
+        let count_tx = Arc::new(count_tx);
+
+        let inner_clone = inner.clone();
+        let count_tx_clone = count_tx.clone();
+        let task = tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                let new_count = {
+                    let mut frames = inner_clone.lock().unwrap();
+                    frames.push(env);
+                    frames.len()
+                };
+                let _ = count_tx_clone.send(new_count);
+            }
+        });
+
+        Self {
+            inner,
+            count_rx,
+            _count_tx: count_tx,
+            _task: task,
+        }
+    }
+
+    /// Wait until a frame with the given Display name has been collected.
+    /// Panics if the frame doesn't appear within 5 seconds.
+    pub async fn wait_for_frame(&self, name: &str) {
+        self.wait_for_frame_timeout(name, Duration::from_secs(5))
+            .await;
+    }
+
+    /// Wait until a frame with the given Display name has been collected,
+    /// with a custom timeout.
+    pub async fn wait_for_frame_timeout(&self, name: &str, timeout: Duration) {
+        let result = tokio::time::timeout(timeout, self.wait_for_frame_inner(name)).await;
+        if result.is_err() {
+            let names = self.frame_names();
+            panic!(
+                "FrameCollector: timed out after {timeout:?} waiting for frame '{name}'. \
+                 Collected so far: {names:?}"
+            );
+        }
+    }
+
+    async fn wait_for_frame_inner(&self, name: &str) {
+        let mut rx = self.count_rx.clone();
+        loop {
+            rx.borrow_and_update();
+            {
+                let frames = self.inner.lock().unwrap();
+                if frames.iter().any(|f| format!("{}", f.frame) == name) {
+                    return;
+                }
+            }
+            if rx.changed().await.is_err() {
+                let names = self.frame_names();
+                panic!(
+                    "FrameCollector: channel closed while waiting for frame '{name}'. \
+                     Collected: {names:?}"
+                );
+            }
+        }
+    }
+
+    /// Wait until a frame matching the predicate has been collected.
+    /// Panics if no match appears within 5 seconds.
+    pub async fn wait_for(&self, pred: impl Fn(&Frame) -> bool) {
+        let result = tokio::time::timeout(Duration::from_secs(5), self.wait_for_inner(&pred)).await;
+        if result.is_err() {
+            let names = self.frame_names();
+            panic!(
+                "FrameCollector: timed out waiting for predicate match. \
+                 Collected so far: {names:?}"
+            );
+        }
+    }
+
+    async fn wait_for_inner(&self, pred: &(impl Fn(&Frame) -> bool + ?Sized)) {
+        let mut rx = self.count_rx.clone();
+        loop {
+            rx.borrow_and_update();
+            {
+                let frames = self.inner.lock().unwrap();
+                if frames.iter().any(|f| pred(&f.frame)) {
+                    return;
+                }
+            }
+            if rx.changed().await.is_err() {
+                let names = self.frame_names();
+                panic!(
+                    "FrameCollector: channel closed while waiting for predicate. \
+                     Collected: {names:?}"
+                );
+            }
+        }
+    }
+
+    /// Wait until at least `count` frames have been collected.
+    /// Panics if the count isn't reached within 5 seconds.
+    pub async fn wait_for_count(&self, count: usize) {
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut rx = self.count_rx.clone();
+            loop {
+                rx.borrow_and_update();
+                if self.count() >= count {
+                    return;
+                }
+                if rx.changed().await.is_err() {
+                    panic!(
+                        "FrameCollector: channel closed at count {} while waiting for {count}",
+                        self.count()
+                    );
+                }
+            }
+        })
+        .await;
+        if result.is_err() {
+            panic!(
+                "FrameCollector: timed out waiting for count {count}, got {}",
+                self.count()
+            );
+        }
+    }
+
+    /// Get the Display names of all collected frames.
+    pub fn frame_names(&self) -> Vec<String> {
+        let frames = self.inner.lock().unwrap();
+        frames.iter().map(|f| format!("{}", f.frame)).collect()
+    }
+
+    /// Clone all collected frames.
+    pub fn frames(&self) -> Vec<FrameEnvelope> {
+        self.inner.lock().unwrap().clone()
+    }
+
+    /// Take all collected frames, clearing the internal buffer.
+    /// Subsequent waits will only see frames arriving after this call.
+    pub fn take_frames(&self) -> Vec<FrameEnvelope> {
+        let mut frames = self.inner.lock().unwrap();
+        std::mem::take(&mut *frames)
+    }
+
+    /// Number of frames collected so far.
+    pub fn count(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Node wiring helpers
 // ---------------------------------------------------------------------------
 
-/// Default settle time for send_and_settle. Allows the node's select loop to process.
-pub const SETTLE: Duration = Duration::from_millis(30);
-
 const DEFAULT_CHANNEL_SIZE: usize = 64;
+
+/// Send a frame through a handle without any sleep. Use with `FrameCollector`
+/// for deterministic synchronization.
+pub async fn send_frame(handle: &ProcessorNodeHandle, frame: Frame, direction: Direction) {
+    handle
+        .send(FrameEnvelope::new(frame), direction)
+        .await
+        .unwrap();
+}
 
 /// Create a node with downstream/upstream output channels.
 pub fn make_node(
@@ -380,25 +568,6 @@ pub fn make_observed_node(
     let (node, handle) =
         ProcessorNode::with_observer(processor, down_tx, up_tx, DEFAULT_CHANNEL_SIZE, observer);
     (node, handle, down_rx, up_rx)
-}
-
-/// Send a frame and wait for it to settle through the node.
-pub async fn send_and_settle(handle: &ProcessorNodeHandle, frame: Frame, direction: Direction) {
-    handle
-        .send(FrameEnvelope::new(frame), direction)
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(30)).await;
-}
-
-/// Collect all available frames from a receiver without blocking.
-pub async fn drain_rx(rx: &mut mpsc::Receiver<FrameEnvelope>) -> Vec<FrameEnvelope> {
-    tokio::task::yield_now().await;
-    let mut result = Vec::new();
-    while let Ok(env) = rx.try_recv() {
-        result.push(env);
-    }
-    result
 }
 
 /// Get Display names of all frames in a slice.

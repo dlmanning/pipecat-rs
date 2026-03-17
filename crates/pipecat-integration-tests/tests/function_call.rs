@@ -210,11 +210,13 @@ async fn function_call_round_trip() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, mut up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -226,9 +228,11 @@ async fn function_call_round_trip() {
         json!({"role": "system", "content": "You are helpful."}),
         json!({"role": "user", "content": "What's the weather in SF?"}),
     ]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    down.wait_for_frame("FunctionCallResult").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -237,10 +241,9 @@ async fn function_call_round_trip() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let downstream_frames = drain_rx(&mut down_rx).await;
-    let upstream_frames = drain_rx(&mut up_rx).await;
-    let down_names = frame_names(&downstream_frames);
-    let up_names = frame_names(&upstream_frames);
+    let downstream_frames = down.frames();
+    let down_names = down.frame_names();
+    let up_names = up.frame_names();
 
     // Verify downstream frame sequence
     assert!(
@@ -363,11 +366,12 @@ async fn multiple_function_calls() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -375,9 +379,13 @@ async fn multiple_function_calls() {
     .await;
 
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "do both"})]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    // Wait for second FunctionCallResult (both calls complete)
+    down.wait_for(|f| matches!(f, Frame::FunctionCallResult(r) if r.function_name == "func_b"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -386,8 +394,8 @@ async fn multiple_function_calls() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let frames = down.frames();
+    let names = down.frame_names();
 
     // Should have exactly one FunctionCallsStarted
     let started_count = names
@@ -478,11 +486,12 @@ async fn catch_all_handler() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -490,9 +499,11 @@ async fn catch_all_handler() {
     .await;
 
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "call it"})]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    down.wait_for_frame("FunctionCallResult").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -501,7 +512,7 @@ async fn catch_all_handler() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     let result = frames
         .iter()
@@ -535,11 +546,12 @@ async fn unregistered_function_produces_error() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -547,9 +559,11 @@ async fn unregistered_function_produces_error() {
     .await;
 
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "try it"})]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    down.wait_for_frame("FunctionCallResult").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -558,7 +572,7 @@ async fn unregistered_function_produces_error() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     let result = frames
         .iter()
@@ -608,11 +622,12 @@ async fn handler_receives_correct_params() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut _down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -629,9 +644,11 @@ async fn handler_receives_correct_params() {
     let tool_choice = json!("auto");
     let ctx_frame =
         make_llm_context_frame_with_tools(messages.clone(), tools.clone(), tool_choice.clone());
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    down.wait_for_frame("FunctionCallResult").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -708,11 +725,12 @@ async fn function_call_timeout() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -723,9 +741,10 @@ async fn function_call_timeout() {
 
     // Time the context processing to verify the timeout actually fired
     let before = Instant::now();
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
-    // Wait a bit extra for the timeout to fire
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+
+    // Wait for the result (the timeout fires at ~50ms)
+    down.wait_for_frame("FunctionCallResult").await;
     let elapsed = before.elapsed();
 
     // The result should have arrived after at least the timeout duration,
@@ -743,7 +762,7 @@ async fn function_call_timeout() {
         elapsed,
     );
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -752,7 +771,7 @@ async fn function_call_timeout() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     let result = frames
         .iter()
@@ -802,11 +821,12 @@ async fn function_calls_started_contains_all_calls() {
     );
 
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -814,9 +834,13 @@ async fn function_calls_started_contains_all_calls() {
     .await;
 
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "go"})]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    // Wait for second result to ensure all function calls are complete
+    down.wait_for(|f| matches!(f, Frame::FunctionCallResult(r) if r.function_name == "beta"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -825,7 +849,7 @@ async fn function_calls_started_contains_all_calls() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     let started = frames
         .iter()

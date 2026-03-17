@@ -56,6 +56,12 @@ async fn coordinator(
 
                 let lifecycle = pending_lifecycle.remove(&frame_id).unwrap_or(tagged);
 
+                // Collect buffered frame IDs BEFORE draining, so we can
+                // re-populate seen_ids after the lifecycle clear. This ensures
+                // late-arriving duplicates from slower branches are caught.
+                let buffered_ids: HashSet<u64> =
+                    buffered.iter().map(|b| b.envelope.header.id).collect();
+
                 // For StartFrame: push lifecycle first, then flush buffered.
                 // For End/Cancel: flush buffered first, then push lifecycle.
                 if matches!(
@@ -77,8 +83,10 @@ async fn coordinator(
                         .ok();
                 }
 
-                // Clear dedup set at epoch boundary and release backpressure.
+                // Clear dedup set at epoch boundary, then re-insert IDs of
+                // frames that were buffered during sync.
                 seen_ids.clear();
+                seen_ids.extend(buffered_ids);
                 synchronizing.store(false, Ordering::SeqCst);
             } else {
                 // Not all branches done yet. Store and wait.
@@ -87,6 +95,8 @@ async fn coordinator(
             }
         } else {
             // Non-lifecycle: deduplicate by frame ID.
+            // Always check seen_ids — even during sync, frames from
+            // different branches can race with lifecycle boundaries.
             if seen_ids.contains(&frame_id) {
                 continue;
             }
@@ -356,10 +366,6 @@ mod tests {
     use super::*;
     use pipecat_core::frame::*;
     use pipecat_core::test_utils::*;
-    use std::time::Duration;
-    use tokio::time::timeout;
-
-    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[tokio::test]
     async fn two_passthrough_branches() {
@@ -368,33 +374,34 @@ mod tests {
             vec![Box::new(PassthroughProcessor::new()) as Box<dyn FrameProcessor>],
         ]);
 
-        let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(parallel));
-        let run = tokio::spawn(async move { node.run().await });
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(parallel));
+        let down = FrameCollector::spawn(down_rx);
+        let _run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("hello")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+
+        down.wait_for_frame("Text").await;
+
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
         )
         .await;
+        down.wait_for_frame("Cancel").await;
 
-        timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
-
-        let frames = drain_rx(&mut down_rx).await;
-        let names = frame_names(&frames);
-
+        let names = down.frame_names();
         assert_eq!(
             names.iter().filter(|n| *n == "Start").count(),
             1,
@@ -419,32 +426,34 @@ mod tests {
             vec![Box::new(PassthroughProcessor::new()) as Box<dyn FrameProcessor>],
         ]);
 
-        let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(parallel));
-        let run = tokio::spawn(async move { node.run().await });
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(parallel));
+        let down = FrameCollector::spawn(down_rx);
+        let _run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("after start")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+
+        down.wait_for_frame("Text").await;
+
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
         )
         .await;
+        down.wait_for_frame("Cancel").await;
 
-        timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
-
-        let frames = drain_rx(&mut down_rx).await;
-        let names = frame_names(&frames);
+        let names = down.frame_names();
 
         let start_pos = names.iter().position(|n| n == "Start");
         let text_pos = names.iter().position(|n| n == "Text");
@@ -465,37 +474,42 @@ mod tests {
             vec![Box::new(PassthroughProcessor::new()) as Box<dyn FrameProcessor>],
         ]);
 
-        let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(parallel));
-        let run = tokio::spawn(async move { node.run().await });
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(parallel));
+        let down = FrameCollector::spawn(down_rx);
+        let _run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("hello")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+
+        // Wait for both Text frames (passthrough + uppercase) before sending Cancel
+        down.wait_for_count(3).await; // Start + 2 Text frames
+
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
         )
         .await;
 
-        timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+        down.wait_for_frame("Cancel").await;
 
-        let frames = drain_rx(&mut down_rx).await;
-        let names = frame_names(&frames);
+        let names = down.frame_names();
 
         assert_eq!(names.iter().filter(|n| *n == "Start").count(), 1);
         assert_eq!(names.iter().filter(|n| *n == "Text").count(), 2);
         assert_eq!(names.iter().filter(|n| *n == "Cancel").count(), 1);
 
+        let frames = down.frames();
         let texts: Vec<&str> = frames
             .iter()
             .filter_map(|f| match &f.frame {

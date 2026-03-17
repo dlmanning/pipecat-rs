@@ -43,10 +43,11 @@ async fn interruption_drains_queued_frames_across_cascade() {
         Box::new(PassthroughProcessor::new()),
     ]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -75,10 +76,10 @@ async fn interruption_drains_queued_frames_across_cascade() {
         .await
         .unwrap();
 
-    // Let everything settle through the cascade.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for interruption to propagate through the cascade
+    down.wait_for_frame("Interruption").await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -87,8 +88,7 @@ async fn interruption_drains_queued_frames_across_cascade() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // The Interruption frame must propagate through.
     assert!(
@@ -130,10 +130,11 @@ async fn interruption_preserves_uninterruptible_in_cascade() {
         Box::new(PassthroughProcessor::new()),
     ]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -169,9 +170,11 @@ async fn interruption_preserves_uninterruptible_in_cascade() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for both Interruption and End to propagate
+    down.wait_for_frame("Interruption").await;
+    down.wait_for_frame("End").await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -180,8 +183,7 @@ async fn interruption_preserves_uninterruptible_in_cascade() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // Interruption must be present.
     assert!(
@@ -236,10 +238,11 @@ async fn interruption_mid_cascade_no_stale_audio_after_interruption() {
 
     let pipeline = Pipeline::new(vec![Box::new(llm), Box::new(tts)]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -254,10 +257,7 @@ async fn interruption_mid_cascade_no_stale_audio_after_interruption() {
         json!({"role": "system", "content": "You are helpful."}),
         json!({"role": "user", "content": "Hello"}),
     ]);
-    handle
-        .send(ctx_frame, Direction::Downstream)
-        .await
-        .unwrap();
+    handle.send(ctx_frame, Direction::Downstream).await.unwrap();
 
     // Brief pause to let some tokens propagate through the LLM and queue at TTS.
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -272,11 +272,11 @@ async fn interruption_mid_cascade_no_stale_audio_after_interruption() {
         .await
         .unwrap();
 
-    // Let everything settle.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for interruption to propagate
+    down.wait_for_frame("Interruption").await;
 
     // Shut down the pipeline.
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -285,8 +285,7 @@ async fn interruption_mid_cascade_no_stale_audio_after_interruption() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // The Interruption frame must appear in the output.
     assert!(
@@ -328,10 +327,11 @@ async fn interruption_preserves_already_delivered_frames() {
 
     let pipeline = Pipeline::new(vec![Box::new(llm), Box::new(tts)]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -340,29 +340,32 @@ async fn interruption_preserves_already_delivered_frames() {
 
     // Trigger LLM and let the full cascade complete.
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "Hi"})]);
-    send_and_settle(&handle, ctx_frame.frame, Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame, Direction::Downstream).await;
 
-    // Allow the cascade to fully propagate (LLM → TTS → output).
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the cascade to fully propagate (LLM → TTS → output).
+    down.wait_for_frame("TTSStopped").await;
 
-    // Drain what's already been output — these frames are "delivered".
-    let early_frames = drain_rx(&mut down_rx).await;
-    let early_names = frame_names(&early_frames);
+    // Record what's already been output — these frames are "delivered".
+    let early_frames = down.take_frames();
+    let early_names: Vec<String> = early_frames
+        .iter()
+        .map(|f| format!("{}", f.frame))
+        .collect();
 
     // The first response should have produced some output (TTS audio for "Short.").
     let has_tts = early_names.iter().any(|n| n == "TTSAudioRaw");
-    // It's possible the full response propagated (deterministic fake services).
-    // Either way, we just record that frames were delivered.
 
     // Now send the Interruption after TTS has already produced output.
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Interruption(InterruptionFrame),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    down.wait_for_frame("Interruption").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -371,8 +374,7 @@ async fn interruption_preserves_already_delivered_frames() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let late_frames = drain_rx(&mut down_rx).await;
-    let late_names = frame_names(&late_frames);
+    let late_names = down.frame_names();
 
     // Interruption must be present in the late output.
     assert!(

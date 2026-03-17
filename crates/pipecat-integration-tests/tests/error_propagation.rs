@@ -77,25 +77,28 @@ async fn failing_processor_error_wrapped_by_node() {
         Box::new(PassthroughProcessor::new()),
         Box::new(FailingProcessor::new()),
     ]);
-    let (node, handle, _down_rx, mut up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, _down_rx, up_rx) = make_node(Box::new(pipeline));
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("trigger")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    up.wait_for_frame("Error").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -104,7 +107,7 @@ async fn failing_processor_error_wrapped_by_node() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let upstream = drain_rx(&mut up_rx).await;
+    let upstream = up.frames();
     let error_frames: Vec<&ErrorFrame> = upstream
         .iter()
         .filter_map(|f| match &f.frame {
@@ -117,7 +120,7 @@ async fn failing_processor_error_wrapped_by_node() {
         error_frames.len(),
         1,
         "expected exactly one ErrorFrame upstream, got: {:?}",
-        frame_names(&upstream)
+        up.frame_names()
     );
 
     let e = error_frames[0];
@@ -155,11 +158,13 @@ async fn error_in_later_processor_doesnt_block_earlier() {
         Box::new(recorder),
         Box::new(ErrorOnTextProcessor::new()),
     ]);
-    let (node, handle, _down_rx, mut up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -167,30 +172,40 @@ async fn error_in_later_processor_doesnt_block_earlier() {
     .await;
 
     // First: Text triggers error in ErrorOnText
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("bad")),
         Direction::Downstream,
     )
     .await;
 
+    // Wait for first error to propagate upstream before sending next frame
+    up.wait_for_frame("Error").await;
+
     // Second: Interruption flows through both processors normally
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Interruption(InterruptionFrame),
         Direction::Downstream,
     )
     .await;
 
+    // Wait for Interruption to fully propagate through the pipeline before
+    // sending the next Text. Otherwise, the Interruption drain may consume it.
+    down.wait_for_frame("Interruption").await;
+
     // Third: another Text — still errors in B, but A should still see it
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("also bad")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    // Wait for the second error to arrive upstream (total of 2 Error frames)
+    up.wait_for_count(2).await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -215,15 +230,16 @@ async fn error_in_later_processor_doesnt_block_earlier() {
     );
 
     // Verify ErrorOnText did push errors upstream
-    let upstream = drain_rx(&mut up_rx).await;
+    let upstream = up.frames();
     let error_count = upstream
         .iter()
         .filter(|f| matches!(&f.frame, Frame::Error(_)))
         .count();
     assert_eq!(
-        error_count, 2,
+        error_count,
+        2,
         "ErrorOnText should have pushed 2 errors upstream: {:?}",
-        frame_names(&upstream)
+        up.frame_names()
     );
 }
 
@@ -240,11 +256,13 @@ async fn non_fatal_error_does_not_stop_pipeline() {
         Box::new(ErrorOnTextProcessor::new()),
         Box::new(PassthroughProcessor::new()),
     ]);
-    let (node, handle, mut down_rx, mut up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -252,22 +270,27 @@ async fn non_fatal_error_does_not_stop_pipeline() {
     .await;
 
     // Text triggers non-fatal error in ErrorOnText
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("bad")),
         Direction::Downstream,
     )
     .await;
 
+    // Wait for error to propagate upstream
+    up.wait_for_frame("Error").await;
+
     // Interruption should still flow through the whole pipeline
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Interruption(InterruptionFrame),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    down.wait_for_frame("Interruption").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -277,18 +300,17 @@ async fn non_fatal_error_does_not_stop_pipeline() {
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
     // Error should arrive upstream
-    let upstream = drain_rx(&mut up_rx).await;
+    let upstream = up.frames();
     assert!(
         upstream
             .iter()
             .any(|f| matches!(&f.frame, Frame::Error(e) if !e.fatal)),
         "non-fatal error should propagate upstream: {:?}",
-        frame_names(&upstream)
+        up.frame_names()
     );
 
     // Interruption should arrive downstream (pipeline still working)
-    let downstream = drain_rx(&mut down_rx).await;
-    let names = frame_names(&downstream);
+    let names = down.frame_names();
     assert!(
         names.contains(&"Interruption".to_string()),
         "pipeline should still forward frames after non-fatal error: {:?}",
@@ -309,25 +331,28 @@ async fn fatal_error_propagates_upstream() {
         Box::new(PassthroughProcessor::new()),
         Box::new(FatalErrorOnTextProcessor::new()),
     ]);
-    let (node, handle, _down_rx, mut up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, _down_rx, up_rx) = make_node(Box::new(pipeline));
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("trigger fatal")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    up.wait_for_frame("Error").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -336,7 +361,7 @@ async fn fatal_error_propagates_upstream() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let upstream = drain_rx(&mut up_rx).await;
+    let upstream = up.frames();
     let fatal_errors: Vec<&ErrorFrame> = upstream
         .iter()
         .filter_map(|f| match &f.frame {
@@ -349,7 +374,7 @@ async fn fatal_error_propagates_upstream() {
         fatal_errors.len(),
         1,
         "expected exactly one fatal ErrorFrame, got: {:?}",
-        frame_names(&upstream)
+        up.frame_names()
     );
 
     let e = fatal_errors[0];
@@ -375,11 +400,12 @@ async fn fatal_error_source_processor_preserved_in_pipeline() {
         Box::new(FatalErrorOnTextProcessor::new()),
         Box::new(PassthroughProcessor::new()),
     ]);
-    let (node, handle, _down_rx, mut up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, _down_rx, up_rx) = make_node(Box::new(pipeline));
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -387,14 +413,16 @@ async fn fatal_error_source_processor_preserved_in_pipeline() {
     .await;
 
     // Uppercase transforms "trigger" → "TRIGGER", then FatalErrorOnText sees Text and errors
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("trigger")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    up.wait_for_frame("Error").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -403,7 +431,7 @@ async fn fatal_error_source_processor_preserved_in_pipeline() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let upstream = drain_rx(&mut up_rx).await;
+    let upstream = up.frames();
     let fatal_errors: Vec<&ErrorFrame> = upstream
         .iter()
         .filter_map(|f| match &f.frame {
@@ -416,7 +444,7 @@ async fn fatal_error_source_processor_preserved_in_pipeline() {
         fatal_errors.len(),
         1,
         "expected exactly one fatal ErrorFrame, got: {:?}",
-        frame_names(&upstream)
+        up.frame_names()
     );
 
     let e = fatal_errors[0];

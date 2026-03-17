@@ -105,13 +105,15 @@ impl FrameProcessor for SequentialFakeSTTService {
 // Helper: run one full user turn (VAD start -> audio -> VAD stop -> wait)
 // ---------------------------------------------------------------------------
 
-async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle) {
+async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle, down: &FrameCollector) {
+    // Clear previously collected frames so we can detect fresh output
+    down.take_frames();
+
     // Start speaking
     handle
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Send audio (STT emits transcription after 1 chunk)
     handle
@@ -121,7 +123,6 @@ async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle) {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Stop speaking — speech timeout (50ms) will trigger turn completion
     handle
@@ -129,8 +130,11 @@ async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle) {
         .await
         .unwrap();
 
-    // Wait for speech timeout (50ms) + pipeline propagation
+    // Wait for speech timeout (50ms) to fire — real time-based behavior
     tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Wait for the turn's TTS output to fully propagate through the pipeline
+    down.wait_for_frame("TTSStopped").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,10 +171,11 @@ async fn two_turns_accumulate_context() {
         assistant_agg,
     ]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -178,11 +183,10 @@ async fn two_turns_accumulate_context() {
     .await;
 
     // --- Turn 1 ---
-    run_turn(&handle).await;
+    run_turn(&handle, &down).await;
 
-    // Drain Turn 1 output
-    let frames_turn1 = drain_rx(&mut down_rx).await;
-    let names_turn1 = frame_names(&frames_turn1);
+    // Verify Turn 1 output
+    let names_turn1 = down.frame_names();
     assert!(
         names_turn1.contains(&"TTSAudioRaw".to_string()),
         "Turn 1 should produce TTS audio: {names_turn1:?}"
@@ -211,18 +215,17 @@ async fn two_turns_accumulate_context() {
     }
 
     // --- Turn 2 ---
-    run_turn(&handle).await;
+    run_turn(&handle, &down).await;
 
-    // Drain Turn 2 output
-    let frames_turn2 = drain_rx(&mut down_rx).await;
-    let names_turn2 = frame_names(&frames_turn2);
+    // Verify Turn 2 output
+    let names_turn2 = down.frame_names();
     assert!(
         names_turn2.contains(&"TTSAudioRaw".to_string()),
         "Turn 2 should produce TTS audio: {names_turn2:?}"
     );
 
     // Shut down
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,

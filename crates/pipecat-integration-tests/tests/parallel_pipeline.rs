@@ -1,10 +1,7 @@
 use std::time::Duration;
 
-use pipecat_core::frame::*;
-use pipecat_core::processor::FrameProcessor;
-use pipecat_core::test_utils::*;
-use pipecat_pipeline::ParallelPipeline;
-use pipecat_pipeline::Pipeline;
+use pipecat_core::{frame::*, processor::FrameProcessor, test_utils::*};
+use pipecat_pipeline::{ParallelPipeline, Pipeline};
 use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,20 +20,26 @@ async fn frame_id_deduplication_with_passthrough_branches() {
     ]);
 
     let pipeline = Pipeline::new(vec![Box::new(parallel)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
 
+    // Wait for Start to fully propagate through the parallel pipeline
+    // (lifecycle sync completes once all branches process it). This ensures
+    // the coordinator's seen_ids set has been cleared before data frames arrive.
+    down.wait_for_frame("Start").await;
+
     // Send multiple text frames — each will be cloned to both branches but
     // should emerge only once from the coordinator due to ID-based dedup.
     for word in ["alpha", "bravo", "charlie"] {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new(word)),
             Direction::Downstream,
@@ -44,7 +47,11 @@ async fn frame_id_deduplication_with_passthrough_branches() {
         .await;
     }
 
-    send_and_settle(
+    // Wait for the last text frame to propagate through.
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "charlie"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -53,8 +60,8 @@ async fn frame_id_deduplication_with_passthrough_branches() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let frames = down.frames();
+    let names = down.frame_names();
 
     // Each text frame should appear exactly once (dedup filters the duplicate).
     let text_values: Vec<&str> = frames
@@ -102,31 +109,42 @@ async fn transforming_branches_produce_independent_output() {
     ]);
 
     let pipeline = Pipeline::new(vec![Box::new(parallel)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("hello")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("world")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    // Wait for both branches to produce output for "world":
+    // - Passthrough: "world" (original ID)
+    // - Uppercase: "WORLD" (new ID)
+    // Wait for the uppercased version of the last word to confirm all frames are through.
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "WORLD"))
+        .await;
+    // Also wait for the passthrough version
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "world"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -135,7 +153,7 @@ async fn transforming_branches_produce_independent_output() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     let text_values: Vec<&str> = frames
         .iter()
@@ -178,10 +196,11 @@ async fn lifecycle_ordering_start_before_data_cancel_after() {
     ]);
 
     let pipeline = Pipeline::new(vec![Box::new(parallel)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -190,7 +209,7 @@ async fn lifecycle_ordering_start_before_data_cancel_after() {
 
     // Send several text frames to have enough data to verify ordering.
     for word in ["one", "two", "three"] {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new(word)),
             Direction::Downstream,
@@ -198,7 +217,15 @@ async fn lifecycle_ordering_start_before_data_cancel_after() {
         .await;
     }
 
-    send_and_settle(
+    // Wait for all text frames from both branches to propagate.
+    // Uppercase branch creates new frames so we get 6 text frames total.
+    // Wait for the last uppercased word to ensure everything is through.
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "THREE"))
+        .await;
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "three"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -207,8 +234,11 @@ async fn lifecycle_ordering_start_before_data_cancel_after() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    // Wait a moment for Cancel to be collected
+    down.wait_for_frame("Cancel").await;
+
+    let frames = down.frames();
+    let names = down.frame_names();
 
     // Start must be the very first frame.
     assert_eq!(

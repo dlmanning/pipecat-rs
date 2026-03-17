@@ -373,28 +373,30 @@ mod tests {
     async fn single_passthrough_processor() {
         let pipeline = Pipeline::new(vec![Box::new(PassthroughProcessor::new())]);
 
-        let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let down = FrameCollector::spawn(down_rx);
         let run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("hello")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::End(EndFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        down.wait_for_frame("End").await;
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
@@ -403,8 +405,7 @@ mod tests {
 
         timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-        let frames = drain_rx(&mut down_rx).await;
-        let names = frame_names(&frames);
+        let names = down.frame_names();
         assert_eq!(names, vec!["Start", "Text", "End", "Cancel"]);
     }
 
@@ -415,22 +416,24 @@ mod tests {
             Box::new(PassthroughProcessor::new()),
         ]);
 
-        let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let down = FrameCollector::spawn(down_rx);
         let run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("hello world")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        down.wait_for_frame("Text").await;
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
@@ -439,8 +442,8 @@ mod tests {
 
         timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-        let frames = drain_rx(&mut down_rx).await;
-        let names = frame_names(&frames);
+        let frames = down.frames();
+        let names = down.frame_names();
         assert_eq!(names, vec!["Start", "Text", "Cancel"]);
 
         // Verify uppercase transformation
@@ -458,22 +461,26 @@ mod tests {
     async fn upstream_error_escapes_pipeline() {
         let pipeline = Pipeline::new(vec![Box::new(ErrorOnTextProcessor::new())]);
 
-        let (node, handle, mut down_rx, mut up_rx) = make_node(Box::new(pipeline));
+        let (node, handle, down_rx, up_rx) = make_node(Box::new(pipeline));
+        let down = FrameCollector::spawn(down_rx);
+        let up = FrameCollector::spawn(up_rx);
         let run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("bad")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        up.wait_for_frame("Error").await;
+        down.wait_for_frame("Start").await;
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
@@ -483,16 +490,14 @@ mod tests {
         timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
         // Error should have escaped upstream through PipelineSource.
-        let up_frames = drain_rx(&mut up_rx).await;
-        let up_names = frame_names(&up_frames);
+        let up_names = up.frame_names();
         assert!(
             up_names.contains(&"Error".to_string()),
             "expected Error upstream, got: {up_names:?}"
         );
 
         // Start and Cancel should still flow downstream.
-        let down_frames = drain_rx(&mut down_rx).await;
-        let down_names = frame_names(&down_frames);
+        let down_names = down.frame_names();
         assert!(down_names.contains(&"Start".to_string()));
         assert!(down_names.contains(&"Cancel".to_string()));
     }
@@ -501,22 +506,24 @@ mod tests {
     async fn empty_pipeline_passes_through() {
         let pipeline = Pipeline::new(vec![]);
 
-        let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let down = FrameCollector::spawn(down_rx);
         let run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new("pass")),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        down.wait_for_frame("Text").await;
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,
@@ -525,8 +532,7 @@ mod tests {
 
         timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-        let frames = drain_rx(&mut down_rx).await;
-        let names = frame_names(&frames);
+        let names = down.frame_names();
         assert_eq!(names, vec!["Start", "Text", "Cancel"]);
     }
 
@@ -535,16 +541,18 @@ mod tests {
         let (passthrough, cleanup_flag) = PassthroughProcessor::with_cleanup_flag();
 
         let pipeline = Pipeline::new(vec![Box::new(passthrough)]);
-        let (node, handle, _down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+        let down = FrameCollector::spawn(down_rx);
         let run = tokio::spawn(async move { node.run().await });
 
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Start(StartFrame::default()),
             Direction::Downstream,
         )
         .await;
-        send_and_settle(
+        down.wait_for_frame("Start").await;
+        send_frame(
             &handle,
             Frame::Cancel(CancelFrame::default()),
             Direction::Downstream,

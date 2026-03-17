@@ -111,31 +111,34 @@ impl FrameProcessor for MetricsEmittingProcessor {
 
 #[tokio::test]
 async fn full_lifecycle_through_node() {
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(PassthroughProcessor::new()));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(PassthroughProcessor::new()));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
     for i in 0..5 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new(format!("msg{i}"))),
             Direction::Downstream,
         )
         .await;
     }
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::End(EndFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    // Wait for normal frames before sending Cancel (system frame)
+    down.wait_for_frame("End").await;
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -144,8 +147,8 @@ async fn full_lifecycle_through_node() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let n = frame_names(&frames);
+    down.wait_for_frame("Cancel").await;
+    let n = down.frame_names();
     assert_eq!(
         n,
         vec![
@@ -159,7 +162,7 @@ async fn full_lifecycle_through_node() {
 async fn multi_node_chain() {
     // Wire: Uppercase → Passthrough
     // Uppercase's downstream feeds into Passthrough's input.
-    let (down_tx, mut final_rx) = mpsc::channel(64);
+    let (down_tx, final_rx) = mpsc::channel(64);
     let (up_tx, _up_rx) = mpsc::channel(64);
 
     // Create Passthrough node (second in chain)
@@ -172,6 +175,8 @@ async fn multi_node_chain() {
     let (up_tx2, _up_rx2) = mpsc::channel(64);
     let (upper_node, upper_handle) =
         ProcessorNode::new(Box::new(UppercaseProcessor::new()), mid_tx, up_tx2, 64);
+
+    let final_down = FrameCollector::spawn(final_rx);
 
     // Spawn both nodes
     let pass_run = tokio::spawn(async move { pass_node.run().await });
@@ -189,19 +194,21 @@ async fn multi_node_chain() {
     });
 
     // Send frames into uppercase node
-    send_and_settle(
+    send_frame(
         &upper_handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &upper_handle,
         Frame::Text(TextFrame::new("hello world")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    // Wait for normal frames to propagate through both nodes before sending Cancel
+    final_down.wait_for_frame("Text").await;
+    send_frame(
         &upper_handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -212,60 +219,66 @@ async fn multi_node_chain() {
     timeout(TEST_TIMEOUT, bridge).await.unwrap().unwrap();
     timeout(TEST_TIMEOUT, pass_run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut final_rx).await;
+    final_down.wait_for_frame("Cancel").await;
+    let frames = final_down.frames();
     // Text should be uppercased by first node, passed through by second
     assert!(
         frames
             .iter()
             .any(|f| matches!(&f.frame, Frame::Text(t) if t.text == "HELLO WORLD")),
         "text should be uppercased through chain: {:?}",
-        frame_names(&frames)
+        final_down.frame_names()
     );
 }
 
 #[tokio::test]
 async fn interruption_with_observer() {
     let obs = IntegrationObserver::new();
-    let (node, handle, _down_rx, _up_rx) =
+    let (node, handle, down_rx, _up_rx) =
         make_observed_node(Box::new(PassthroughProcessor::new()), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
 
+    // Wait for Start to be processed before queuing texts + interruption
+    down.wait_for_frame("Start").await;
+
     // Queue texts and interruption simultaneously
     for i in 0..5 {
-        handle
-            .send(
-                FrameEnvelope::new(Frame::Text(TextFrame::new(format!("pre_{i}")))),
-                Direction::Downstream,
-            )
-            .await
-            .unwrap();
-    }
-    handle
-        .send(
-            FrameEnvelope::new(Frame::Interruption(InterruptionFrame)),
+        send_frame(
+            &handle,
+            Frame::Text(TextFrame::new(format!("pre_{i}"))),
             Direction::Downstream,
         )
-        .await
-        .unwrap();
+        .await;
+    }
+    send_frame(
+        &handle,
+        Frame::Interruption(InterruptionFrame),
+        Direction::Downstream,
+    )
+    .await;
 
-    tokio::time::sleep(SETTLE).await;
+    // Wait for interruption to be processed
+    down.wait_for_frame("Interruption").await;
 
     // Post-interrupt text
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("post")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "post"))
+        .await;
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -290,24 +303,27 @@ async fn interruption_with_observer() {
 #[tokio::test]
 async fn metrics_flow_end_to_end() {
     let obs = IntegrationObserver::new();
-    let (node, handle, mut down_rx, _up_rx) =
+    let (node, handle, down_rx, _up_rx) =
         make_observed_node(Box::new(MetricsEmittingProcessor::new()), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("trigger metrics")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    // Wait for normal frames (Metrics + Text) before sending Cancel
+    down.wait_for_frame("Text").await;
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -316,7 +332,8 @@ async fn metrics_flow_end_to_end() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    down.wait_for_frame("Cancel").await;
+    let frames = down.frames();
 
     // Should have: Start, MetricsFrame, Text, Cancel
     assert!(
@@ -324,7 +341,7 @@ async fn metrics_flow_end_to_end() {
             .iter()
             .any(|f| matches!(&f.frame, Frame::Metrics(m) if !m.data.is_empty())),
         "MetricsFrame should arrive downstream: {:?}",
-        frame_names(&frames)
+        down.frame_names()
     );
 
     // Observer should see the MetricsFrame push
@@ -338,23 +355,27 @@ async fn metrics_flow_end_to_end() {
 
 #[tokio::test]
 async fn error_propagation_through_node() {
-    let (node, handle, _down_rx, mut up_rx) = make_node(Box::new(ErrorOnTextProcessor::new()));
+    let (node, handle, down_rx, up_rx) = make_node(Box::new(ErrorOnTextProcessor::new()));
+    let down = FrameCollector::spawn(down_rx);
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("trigger error")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    // Wait for the error to propagate upstream before sending Cancel
+    up.wait_for_frame("Error").await;
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -363,13 +384,14 @@ async fn error_propagation_through_node() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let errors = drain_rx(&mut up_rx).await;
+    down.wait_for_frame("Cancel").await;
+    let errors = up.frames();
     assert!(
         errors
             .iter()
             .any(|f| matches!(&f.frame, Frame::Error(e) if e.error == "text not allowed")),
         "ErrorFrame should propagate upstream: {:?}",
-        frame_names(&errors)
+        up.frame_names()
     );
 }
 
@@ -378,19 +400,21 @@ async fn pause_resume_with_observer() {
     let obs = IntegrationObserver::new();
     let processor_name = "Recorder"; // RecorderProcessor's default name
     let (recorder, record) = RecorderProcessor::new();
-    let (node, handle, _down_rx, _up_rx) = make_observed_node(Box::new(recorder), obs.clone());
+    let (node, handle, down_rx, _up_rx) = make_observed_node(Box::new(recorder), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
+    down.wait_for_frame("Start").await;
 
     // Pause
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::ProcessorPauseUrgent(ProcessorPauseUrgentFrame {
             processor_name: processor_name.into(),
@@ -398,17 +422,19 @@ async fn pause_resume_with_observer() {
         Direction::Downstream,
     )
     .await;
+    down.wait_for_frame("ProcessorPauseUrgent").await;
 
     // System frame while paused — observer should still see it
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::BotStartedSpeaking(BotStartedSpeakingFrame),
         Direction::Downstream,
     )
     .await;
+    down.wait_for_frame("BotStartedSpeaking").await;
 
     // Resume
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::ProcessorResumeUrgent(ProcessorResumeUrgentFrame {
             processor_name: processor_name.into(),
@@ -416,8 +442,9 @@ async fn pause_resume_with_observer() {
         Direction::Downstream,
     )
     .await;
+    down.wait_for_frame("ProcessorResumeUrgent").await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -446,21 +473,22 @@ async fn pause_resume_with_observer() {
 async fn cleanup_on_both_exit_paths() {
     // Cancel path
     let (proc1, flag1) = PassthroughProcessor::with_cleanup_flag();
-    let (node1, handle1, _d1, _u1) = make_node(Box::new(proc1));
+    let (node1, handle1, d1, _u1) = make_node(Box::new(proc1));
+    let down1 = FrameCollector::spawn(d1);
     let run1 = tokio::spawn(async move { node1.run().await });
-    send_and_settle(
+    send_frame(
         &handle1,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    handle1
-        .send(
-            FrameEnvelope::new(Frame::Cancel(CancelFrame::default())),
-            Direction::Downstream,
-        )
-        .await
-        .unwrap();
+    down1.wait_for_frame("Start").await;
+    send_frame(
+        &handle1,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
     timeout(TEST_TIMEOUT, run1).await.unwrap().unwrap();
     assert!(flag1.load(Ordering::SeqCst), "cleanup on Cancel");
 
@@ -643,23 +671,26 @@ impl FrameProcessor for HookTracker {
 #[tokio::test]
 async fn hooks_fire_before_and_after() {
     let (tracker, before, after, names) = HookTracker::new();
-    let (node, handle, _down_rx, _up_rx) = make_node(Box::new(tracker));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(tracker));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("hooked")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    // Wait for normal frames before sending Cancel (system frame)
+    down.wait_for_frame("Text").await;
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -672,10 +703,10 @@ async fn hooks_fire_before_and_after() {
     assert_eq!(before.load(Ordering::SeqCst), 3);
     assert_eq!(after.load(Ordering::SeqCst), 3);
 
-    let frame_names = names.lock().unwrap();
-    assert!(frame_names.contains(&"Start".to_string()));
-    assert!(frame_names.contains(&"Text".to_string()));
-    assert!(frame_names.contains(&"Cancel".to_string()));
+    let hook_names = names.lock().unwrap();
+    assert!(hook_names.contains(&"Start".to_string()));
+    assert!(hook_names.contains(&"Text".to_string()));
+    assert!(hook_names.contains(&"Cancel".to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -934,22 +965,25 @@ impl FrameProcessor for SetupTracker {
 async fn setup_called_before_frames() {
     let (tracker, setup_called) = SetupTracker::new();
     let frames_before_setup = tracker.frames_before_setup.clone();
-    let (node, handle, _down_rx, _up_rx) = make_node(Box::new(tracker));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(tracker));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("hello")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    // Wait for normal frames before sending Cancel (system frame)
+    down.wait_for_frame("Text").await;
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,

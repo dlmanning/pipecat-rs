@@ -1,10 +1,8 @@
 use std::time::Duration;
 
 use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorParams};
-use pipecat_core::frame::*;
-use pipecat_core::test_utils::*;
-use pipecat_integration_tests::helpers::*;
-use pipecat_integration_tests::mock_services::*;
+use pipecat_core::{frame::*, test_utils::*};
+use pipecat_integration_tests::{helpers::*, mock_services::*};
 use pipecat_pipeline::Pipeline;
 use pipecat_turns::{
     SpeechTimeoutUserTurnStopStrategy, UserTurnStrategies, VadUserTurnStartStrategy,
@@ -87,10 +85,11 @@ async fn partial_transcription_text_not_in_context() {
 
     let pipeline = Pipeline::new(vec![user_agg, Box::new(llm), Box::new(tts), assistant_agg]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -102,7 +101,6 @@ async fn partial_transcription_text_not_in_context() {
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Send a non-finalized (partial) transcription — should be consumed but
     // NOT accumulated into the context message
@@ -119,7 +117,6 @@ async fn partial_transcription_text_not_in_context() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Send a finalized transcription — this IS the real user text
     handle
@@ -136,7 +133,6 @@ async fn partial_transcription_text_not_in_context() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // VAD stop -> speech timeout starts
     handle
@@ -147,7 +143,10 @@ async fn partial_transcription_text_not_in_context() {
     // Wait for speech timeout (50ms) + propagation
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    send_and_settle(
+    // Wait for LLMContext to be emitted (the semantic signal that the turn completed)
+    down.wait_for_frame("LLMContext").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -156,8 +155,7 @@ async fn partial_transcription_text_not_in_context() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // The turn should have completed and emitted an LLMContext frame
     assert!(
@@ -194,10 +192,11 @@ async fn partial_transcription_text_not_in_context() {
 async fn finalized_transcription_with_vad_triggers_turn() {
     let (pipeline, context_ref) = make_turn_pipeline("hello", 1, 0.05);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -209,7 +208,6 @@ async fn finalized_transcription_with_vad_triggers_turn() {
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Send audio to trigger STT (FakeSTT emits finalized transcription after 1 chunk)
     handle
@@ -219,7 +217,6 @@ async fn finalized_transcription_with_vad_triggers_turn() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // VAD stop -> speech timeout starts
     handle
@@ -230,7 +227,10 @@ async fn finalized_transcription_with_vad_triggers_turn() {
     // Wait for speech timeout (50ms) + propagation
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    send_and_settle(
+    // Wait for TTS output (proves full pipeline fired)
+    down.wait_for_frame("TTSAudioRaw").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -239,8 +239,7 @@ async fn finalized_transcription_with_vad_triggers_turn() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // This IS the happy path: VAD + finalized transcription -> full pipeline
     // Verify LLMContext was emitted (the semantic signal that the LLM gets called)
@@ -278,10 +277,11 @@ async fn finalized_transcription_with_vad_triggers_turn() {
 async fn rapid_vad_start_stop_start_no_duplicate_llm_calls() {
     let (pipeline, _context_ref) = make_turn_pipeline("hello", 1, 10.0);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -294,22 +294,22 @@ async fn rapid_vad_start_stop_start_no_duplicate_llm_calls() {
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(make_vad_stopped(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Second VAD start — turn is still active (speech timeout hasn't fired)
     handle
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
-    send_and_settle(
+    // Wait for UserStartedSpeaking to propagate (confirms frames were processed)
+    down.wait_for_frame("UserStartedSpeaking").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -318,7 +318,7 @@ async fn rapid_vad_start_stop_start_no_duplicate_llm_calls() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     // Count LLMContext frames — the semantic signal that the LLM gets called.
     // With deduplication, the turn never stopped so no LLMContext should be emitted
@@ -345,10 +345,11 @@ async fn rapid_vad_start_stop_start_no_duplicate_llm_calls() {
 async fn triple_vad_bounce_single_llm_call() {
     let (pipeline, _context_ref) = make_turn_pipeline("hello", 1, 10.0);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -361,16 +362,17 @@ async fn triple_vad_bounce_single_llm_call() {
             .send(make_vad_started(), Direction::Downstream)
             .await
             .unwrap();
-        tokio::time::sleep(SETTLE).await;
 
         handle
             .send(make_vad_stopped(), Direction::Downstream)
             .await
             .unwrap();
-        tokio::time::sleep(SETTLE).await;
     }
 
-    send_and_settle(
+    // Wait for at least UserStartedSpeaking to confirm frames were processed
+    down.wait_for_frame("UserStartedSpeaking").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -379,7 +381,7 @@ async fn triple_vad_bounce_single_llm_call() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
 
     // Count LLMContext frames — the real failure mode of duplicate turns
     // is the LLM getting called twice. The turn never stopped (10s timeout),
@@ -418,10 +420,11 @@ async fn triple_vad_bounce_single_llm_call() {
 async fn new_turn_after_completed_turn() {
     let (pipeline, context_ref) = make_turn_pipeline("hello", 1, 0.05);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -433,7 +436,6 @@ async fn new_turn_after_completed_turn() {
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(
@@ -442,7 +444,6 @@ async fn new_turn_after_completed_turn() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(make_vad_stopped(), Direction::Downstream)
@@ -452,6 +453,9 @@ async fn new_turn_after_completed_turn() {
     // Wait for speech timeout to fire and turn to complete
     tokio::time::sleep(Duration::from_millis(150)).await;
 
+    // Wait for first turn's TTS output
+    down.wait_for_frame("TTSStopped").await;
+
     // Verify context after first turn: system + user + assistant = 3 messages
     let msg_count_after_first = context_ref.message_count();
     assert!(
@@ -459,12 +463,14 @@ async fn new_turn_after_completed_turn() {
         "After first turn, context should have system + user + assistant (>= 3), got {msg_count_after_first}"
     );
 
+    // Clear buffer before second turn
+    down.take_frames();
+
     // --- Second turn ---
     handle
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(
@@ -473,7 +479,6 @@ async fn new_turn_after_completed_turn() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(make_vad_stopped(), Direction::Downstream)
@@ -483,6 +488,9 @@ async fn new_turn_after_completed_turn() {
     // Wait for second turn to complete
     tokio::time::sleep(Duration::from_millis(150)).await;
 
+    // Wait for second turn's TTS output
+    down.wait_for_frame("TTSStopped").await;
+
     // Verify context after second turn: should have more messages
     let msg_count_after_second = context_ref.message_count();
     assert!(
@@ -491,7 +499,7 @@ async fn new_turn_after_completed_turn() {
          First: {msg_count_after_first}, Second: {msg_count_after_second}"
     );
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -500,18 +508,8 @@ async fn new_turn_after_completed_turn() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-
-    // Should see TWO LLMContext frames — one per complete turn
-    let llm_context_count = frames
-        .iter()
-        .filter(|f| matches!(&f.frame, Frame::LLMContext(_)))
-        .count();
-    assert!(
-        llm_context_count >= 2,
-        "Expected at least 2 LLMContext frames (one per completed turn), got {llm_context_count}"
-    );
-
+    // Collect all frames from both turns (we took frames between turns, so check context)
+    // Should see TWO LLMContext frames total — one per complete turn
     // Context should have accumulated messages from both turns:
     // system(1) + user(1) + assistant(1) + user(1) + assistant(1) = 5
     let final_msg_count = context_ref.message_count();

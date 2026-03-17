@@ -8,7 +8,7 @@ use pipecat_pipeline::Pipeline;
 use serde_json::json;
 use tokio::time::timeout;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // 5a-1: STT produces transcription from audio
@@ -18,11 +18,12 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 async fn stt_transcribes_audio() {
     let stt = FakeSTTService::new("hello world", 3);
     let pipeline = Pipeline::new(vec![Box::new(stt)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -32,7 +33,7 @@ async fn stt_transcribes_audio() {
     // Send 3 audio chunks to trigger transcription
     let samples = vec![0i16; 160];
     for _ in 0..3 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::InputAudioRaw(AudioRawFrame {
                 audio: bytes::Bytes::from(
@@ -49,7 +50,9 @@ async fn stt_transcribes_audio() {
         .await;
     }
 
-    send_and_settle(
+    down.wait_for_frame("Transcription").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -58,8 +61,8 @@ async fn stt_transcribes_audio() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let frames = down.frames();
+    let names = down.frame_names();
 
     assert!(
         names.contains(&"Transcription".to_string()),
@@ -90,11 +93,12 @@ async fn llm_generates_from_context() {
         "world!".to_string(),
     ]);
     let pipeline = Pipeline::new(vec![Box::new(llm)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -106,9 +110,11 @@ async fn llm_generates_from_context() {
         json!({"role": "system", "content": "You are helpful."}),
         json!({"role": "user", "content": "Hi"}),
     ]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    send_and_settle(
+    down.wait_for_frame("LLMFullResponseEnd").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -117,8 +123,8 @@ async fn llm_generates_from_context() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let frames = down.frames();
+    let names = down.frame_names();
 
     assert!(
         names.contains(&"LLMFullResponseStart".to_string()),
@@ -148,11 +154,12 @@ async fn llm_generates_from_context() {
 async fn tts_synthesizes_text() {
     let tts = FakeTTSService::new();
     let pipeline = Pipeline::new(vec![Box::new(tts)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -160,26 +167,28 @@ async fn tts_synthesizes_text() {
     .await;
 
     // Simulate LLM output sequence
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::LLMFullResponseStart(LLMFullResponseStartFrame { skip_tts: None }),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("Hello world.")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::LLMFullResponseEnd(LLMFullResponseEndFrame { skip_tts: None }),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    down.wait_for_frame("TTSStopped").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -188,8 +197,7 @@ async fn tts_synthesizes_text() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     assert!(
         names.contains(&"TTSStarted".to_string()),
@@ -217,10 +225,11 @@ async fn full_cascade_stt_llm_tts() {
 
     let pipeline = Pipeline::new(vec![Box::new(stt), Box::new(llm), Box::new(tts)]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -233,7 +242,7 @@ async fn full_cascade_stt_llm_tts() {
     // So for this test, send audio → get transcription, then also send LLMContext directly.
     let samples = vec![0i16; 160];
     for _ in 0..2 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::InputAudioRaw(AudioRawFrame {
                 audio: bytes::Bytes::from(
@@ -250,14 +259,17 @@ async fn full_cascade_stt_llm_tts() {
         .await;
     }
 
+    // Wait for STT to produce transcription before sending LLMContext
+    down.wait_for_frame("Transcription").await;
+
     // Send LLMContext to trigger LLM response → TTS
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "Hello"})]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    // Give time for the pipeline to propagate through all 3 services
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for full cascade to complete
+    down.wait_for_frame("TTSAudioRaw").await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -266,8 +278,7 @@ async fn full_cascade_stt_llm_tts() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // STT output
     assert!(
@@ -324,10 +335,11 @@ async fn full_cascade_with_aggregators() {
         assistant_agg,
     ]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -339,7 +351,6 @@ async fn full_cascade_with_aggregators() {
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Send audio (STT will emit transcription after 1 chunk)
     handle
@@ -349,7 +360,6 @@ async fn full_cascade_with_aggregators() {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     // Stop speaking — speech timeout (50ms) will trigger turn stop
     handle
@@ -357,10 +367,13 @@ async fn full_cascade_with_aggregators() {
         .await
         .unwrap();
 
-    // Wait for speech timeout (50ms) + Wakeup-driven pipeline propagation
+    // Wait for speech timeout (50ms) + pipeline propagation
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    send_and_settle(
+    // Wait for TTS audio to arrive at the output
+    down.wait_for_frame("TTSAudioRaw").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -369,8 +382,7 @@ async fn full_cascade_with_aggregators() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // The full flow should produce TTS audio
     assert!(

@@ -91,30 +91,35 @@ impl PipelineObserver for RecordingObserver {
 #[tokio::test]
 async fn single_node_observer_records_process_and_push_events() {
     let obs = RecordingObserver::new();
-    let (node, handle, _down_rx, _up_rx) =
+    let (node, handle, down_rx, _up_rx) =
         make_observed_node(Box::new(PassthroughProcessor::new()), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("hello")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("world")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+
+    // Wait for both Text frames to propagate
+    down.wait_for_count(3).await; // Start + 2 Text
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -174,24 +179,30 @@ async fn single_node_observer_records_process_and_push_events() {
 #[tokio::test]
 async fn observer_sees_uppercase_transformation() {
     let obs = RecordingObserver::new();
-    let (node, handle, mut down_rx, _up_rx) =
+    let (node, handle, down_rx, _up_rx) =
         make_observed_node(Box::new(UppercaseProcessor::new()), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("hello")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+
+    // Wait for the transformed text
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "HELLO"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -231,7 +242,7 @@ async fn observer_sees_uppercase_transformation() {
     }
 
     // Verify the transformed text arrives downstream
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
     let text_frame = frames
         .iter()
         .find_map(|f| match &f.frame {
@@ -249,24 +260,29 @@ async fn observer_sees_uppercase_transformation() {
 #[tokio::test]
 async fn observer_records_error_pushed_upstream() {
     let obs = RecordingObserver::new();
-    let (node, handle, _down_rx, _up_rx) =
+    let (node, handle, _down_rx, up_rx) =
         make_observed_node(Box::new(ErrorOnTextProcessor::new()), obs.clone());
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("trigger")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+
+    // Wait for error to propagate upstream
+    up.wait_for_frame("Error").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -312,13 +328,13 @@ async fn observer_pipeline_started_fires() {
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -355,13 +371,13 @@ async fn pipeline_observer_started_fires_per_node() {
     let (node, handle, _down_rx, _up_rx) = make_node(Box::new(pipeline));
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -397,23 +413,29 @@ async fn pipeline_observer_sees_all_processors() {
     ])
     .with_observer(obs.clone());
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("test")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+
+    // Wait for transformed text
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "TEST"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -443,7 +465,7 @@ async fn pipeline_observer_sees_all_processors() {
     }
 
     // Verify the pipeline end result
-    let frames = drain_rx(&mut down_rx).await;
+    let frames = down.frames();
     let text_frame = frames
         .iter()
         .find_map(|f| match &f.frame {
@@ -468,23 +490,29 @@ async fn pipeline_observer_events_in_order() {
     ])
     .with_observer(obs.clone());
 
-    let (node, handle, _down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("order")),
         Direction::Downstream,
     )
     .await;
-    send_and_settle(
+
+    // Wait for transformed text to ensure it has been processed by both processors
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "ORDER"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -544,12 +572,13 @@ async fn observer_counts_match_expected() {
     // Single Passthrough: every frame processed = one process event + one push event.
     // We use >= assertions because the framework may inject internal frames
     // (e.g., metrics) that we should tolerate without breaking the test.
-    let (node, handle, _down_rx, _up_rx) =
+    let (node, handle, down_rx, _up_rx) =
         make_observed_node(Box::new(PassthroughProcessor::new()), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -558,7 +587,7 @@ async fn observer_counts_match_expected() {
 
     // Send exactly 3 text frames
     for i in 0..3 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::Text(TextFrame::new(format!("msg{i}"))),
             Direction::Downstream,
@@ -566,7 +595,10 @@ async fn observer_counts_match_expected() {
         .await;
     }
 
-    send_and_settle(
+    // Wait for all 3 text frames + Start = 4
+    down.wait_for_count(4).await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -638,10 +670,11 @@ async fn observer_on_cascade_pipeline() {
     let pipeline =
         Pipeline::new(vec![Box::new(stt), Box::new(llm), Box::new(tts)]).with_observer(obs.clone());
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -650,7 +683,7 @@ async fn observer_on_cascade_pipeline() {
 
     // Send audio to trigger STT -> Transcription
     let samples = vec![0i16; 160];
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::InputAudioRaw(AudioRawFrame {
             audio: bytes::Bytes::from(
@@ -668,17 +701,12 @@ async fn observer_on_cascade_pipeline() {
 
     // Also send LLMContext to trigger LLM -> TTS
     let ctx_frame = make_llm_context_frame(vec![json!({"role": "user", "content": "hello"})]);
-    send_and_settle(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
+    send_frame(&handle, ctx_frame.frame.clone(), Direction::Downstream).await;
 
-    // Wait for pipeline propagation through all 3 services. The cascade
-    // STT -> LLM -> TTS involves async processing across multiple nodes with
-    // bridge tasks forwarding frames between them. 100ms is sufficient because
-    // all services are fake (no I/O), and each hop is a tokio channel send.
-    // The sleep ensures frames have propagated through the entire chain before
-    // we send Cancel, which shuts down the pipeline.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for full cascade to complete
+    down.wait_for_frame("TTSAudioRaw").await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -727,8 +755,7 @@ async fn observer_on_cascade_pipeline() {
     }
 
     // Verify the pipeline actually produced output
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
     assert!(
         names.contains(&"TTSAudioRaw".to_string()),
         "cascade pipeline should produce TTS audio: {names:?}"
@@ -771,12 +798,13 @@ async fn latency_observer_measures_user_to_bot_latency() {
     let latency_obs = Arc::new(UserBotLatencyObserver::new(handler.clone()));
 
     // Use a Passthrough so frames flow through to the latency observer's push handler.
-    let (node, handle, _down_rx, _up_rx) =
+    let (node, handle, down_rx, _up_rx) =
         make_observed_node(Box::new(PassthroughProcessor::new()), latency_obs);
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -788,7 +816,7 @@ async fn latency_observer_measures_user_to_bot_latency() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::VADUserStoppedSpeaking(VADUserStoppedSpeakingFrame {
             stop_secs: 0.0,
@@ -802,14 +830,16 @@ async fn latency_observer_measures_user_to_bot_latency() {
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     // Simulate bot started speaking
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::BotStartedSpeaking(BotStartedSpeakingFrame),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    down.wait_for_frame("BotStartedSpeaking").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -842,12 +872,14 @@ async fn latency_observer_measures_user_to_bot_latency() {
 #[tokio::test]
 async fn observer_records_upstream_frames() {
     let obs = RecordingObserver::new();
-    let (node, handle, _down_rx, _up_rx) =
+    let (node, handle, down_rx, up_rx) =
         make_observed_node(Box::new(PassthroughProcessor::new()), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
+    let up = FrameCollector::spawn(up_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -855,22 +887,29 @@ async fn observer_records_upstream_frames() {
     .await;
 
     // Send a frame upstream
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("upstream_msg")),
         Direction::Upstream,
     )
     .await;
 
+    // Wait for upstream frame to be received
+    up.wait_for_frame("Text").await;
+
     // Send a frame downstream
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Text(TextFrame::new("downstream_msg")),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    // Wait for downstream text
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "downstream_msg"))
+        .await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,

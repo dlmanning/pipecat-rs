@@ -1,18 +1,18 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tracing::{debug, trace};
-
-use pipecat_core::error::Result;
-use pipecat_core::frame::*;
-use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use pipecat_core::{
+    error::Result,
+    frame::*,
+    processor::{FrameProcessor, ProcessorBase, ProcessorContext},
+};
 use pipecat_turns::{
     TurnAction, UserTurnController, UserTurnStartedParams, UserTurnStoppedParams,
     UserTurnStrategies,
 };
+use tracing::{debug, trace};
 
-use crate::aggregator::LLMContextAggregatorBase;
-use crate::context::LLMContext;
+use crate::{aggregator::LLMContextAggregatorBase, context::LLMContext};
 
 /// Parameters for configuring the user aggregator.
 #[derive(Debug)]
@@ -263,10 +263,11 @@ impl FrameProcessor for LLMUserAggregator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use pipecat_core::test_utils::run_processor;
     use pipecat_turns::{SpeechTimeoutUserTurnStopStrategy, VadUserTurnStartStrategy};
     use serde_json::json;
+
+    use super::*;
 
     fn make_params() -> LLMUserAggregatorParams {
         LLMUserAggregatorParams {

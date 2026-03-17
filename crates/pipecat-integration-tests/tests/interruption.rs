@@ -48,12 +48,14 @@ fn make_pipeline_with_aggregators(context: LLMContext) -> (Box<dyn FrameProcesso
 // Helper: run one full turn (VAD start → audio → VAD stop → wait for timeout)
 // ---------------------------------------------------------------------------
 
-async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle) {
+async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle, down: &FrameCollector) {
+    // Clear any previously collected frames so we can wait for fresh output
+    down.take_frames();
+
     handle
         .send(make_vad_started(), Direction::Downstream)
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(
@@ -62,15 +64,17 @@ async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle) {
         )
         .await
         .unwrap();
-    tokio::time::sleep(SETTLE).await;
 
     handle
         .send(make_vad_stopped(), Direction::Downstream)
         .await
         .unwrap();
 
-    // Wait for speech timeout (50ms) + Wakeup-driven pipeline propagation
+    // Wait for speech timeout (50ms) to fire — this is a real time-based behavior
     tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Wait for the turn's TTS output to fully propagate through the pipeline
+    down.wait_for_frame("TTSStopped").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,11 +85,12 @@ async fn run_turn(handle: &pipecat_core::node::ProcessorNodeHandle) {
 async fn interruption_allows_new_turn() {
     let context = LLMContext::new(vec![json!({"role": "system", "content": "test"})]);
     let (pipeline, context_ref) = make_pipeline_with_aggregators(context);
-    let (node, handle, mut down_rx, _up_rx) = make_node(pipeline);
+    let (node, handle, down_rx, _up_rx) = make_node(pipeline);
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -93,22 +98,20 @@ async fn interruption_allows_new_turn() {
     .await;
 
     // --- Turn 1: normal flow ---
-    run_turn(&handle).await;
+    run_turn(&handle, &down).await;
 
     // Verify Turn 1 produced TTS output
-    let frames_so_far = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames_so_far);
+    let names = down.frame_names();
     assert!(
         names.contains(&"TTSAudioRaw".to_string()),
         "Turn 1 should produce TTS audio: {names:?}"
     );
 
     // --- Turn 2: user speaks again (triggers interruption of bot speech) ---
-    run_turn(&handle).await;
+    run_turn(&handle, &down).await;
 
     // Verify Turn 2 also produced TTS output
-    let frames_turn2 = drain_rx(&mut down_rx).await;
-    let names_turn2 = frame_names(&frames_turn2);
+    let names_turn2 = down.frame_names();
     assert!(
         names_turn2.contains(&"TTSAudioRaw".to_string()),
         "Turn 2 should produce TTS audio after interruption: {names_turn2:?}"
@@ -120,7 +123,7 @@ async fn interruption_allows_new_turn() {
         "Turn 2 start should broadcast interruption: {names_turn2:?}"
     );
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -149,24 +152,27 @@ async fn interruption_passes_through_pipeline() {
 
     let pipeline = Pipeline::new(vec![Box::new(stt), Box::new(llm), Box::new(tts)]);
 
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Interruption(InterruptionFrame),
         Direction::Downstream,
     )
     .await;
 
-    send_and_settle(
+    down.wait_for_frame("Interruption").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -175,8 +181,7 @@ async fn interruption_passes_through_pipeline() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     assert!(
         names.contains(&"Interruption".to_string()),
@@ -190,11 +195,12 @@ async fn interruption_passes_through_pipeline() {
 
 #[tokio::test]
 async fn interruption_drains_interruptible_preserves_uninterruptible() {
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(PassthroughProcessor::new()));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(PassthroughProcessor::new()));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -229,9 +235,13 @@ async fn interruption_drains_interruptible_preserves_uninterruptible() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the interruption to propagate through
+    down.wait_for_frame("Interruption").await;
 
-    send_and_settle(
+    // Also wait for End (uninterruptible) — it should survive
+    down.wait_for_frame("End").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -240,8 +250,7 @@ async fn interruption_drains_interruptible_preserves_uninterruptible() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // End (uninterruptible) should be preserved
     assert!(

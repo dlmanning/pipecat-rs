@@ -16,11 +16,12 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 async fn sps_audio_round_trip() {
     let realtime = FakeRealtimeProcessor::new(3);
     let pipeline = Pipeline::new(vec![Box::new(realtime)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -29,7 +30,7 @@ async fn sps_audio_round_trip() {
 
     // Send 3 audio chunks to trigger response
     for _ in 0..3 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::InputAudioRaw(AudioRawFrame {
                 audio: bytes::Bytes::from(vec![0u8; 320]),
@@ -41,7 +42,9 @@ async fn sps_audio_round_trip() {
         .await;
     }
 
-    send_and_settle(
+    down.wait_for_frame("TTSAudioRaw").await;
+
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -50,8 +53,7 @@ async fn sps_audio_round_trip() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     assert!(
         names.contains(&"TTSAudioRaw".to_string()),
@@ -67,11 +69,12 @@ async fn sps_audio_round_trip() {
 async fn sps_interruption_resets() {
     let realtime = FakeRealtimeProcessor::new(3);
     let pipeline = Pipeline::new(vec![Box::new(realtime)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -80,7 +83,7 @@ async fn sps_interruption_resets() {
 
     // Send 2 audio chunks (not enough to trigger response)
     for _ in 0..2 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::InputAudioRaw(AudioRawFrame {
                 audio: bytes::Bytes::from(vec![0u8; 320]),
@@ -93,16 +96,18 @@ async fn sps_interruption_resets() {
     }
 
     // Interrupt — should reset chunk counter
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Interruption(InterruptionFrame),
         Direction::Downstream,
     )
     .await;
 
+    down.wait_for_frame("Interruption").await;
+
     // Send 2 more chunks — still not enough (counter was reset)
     for _ in 0..2 {
-        send_and_settle(
+        send_frame(
             &handle,
             Frame::InputAudioRaw(AudioRawFrame {
                 audio: bytes::Bytes::from(vec![0u8; 320]),
@@ -114,7 +119,7 @@ async fn sps_interruption_resets() {
         .await;
     }
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -123,8 +128,7 @@ async fn sps_interruption_resets() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    let names = down.frame_names();
 
     // Should NOT have audio output (reset prevented threshold)
     assert!(
@@ -147,11 +151,12 @@ async fn sps_interruption_resets() {
 async fn sps_consumes_audio() {
     let realtime = FakeRealtimeProcessor::new(100); // high threshold, won't emit
     let pipeline = Pipeline::new(vec![Box::new(realtime)]);
-    let (node, handle, mut down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
 
     let run = tokio::spawn(async move { node.run().await });
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Start(StartFrame::default()),
         Direction::Downstream,
@@ -159,7 +164,7 @@ async fn sps_consumes_audio() {
     .await;
 
     // Send audio
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::InputAudioRaw(AudioRawFrame {
             audio: bytes::Bytes::from(vec![0u8; 320]),
@@ -170,7 +175,7 @@ async fn sps_consumes_audio() {
     )
     .await;
 
-    send_and_settle(
+    send_frame(
         &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
@@ -179,8 +184,10 @@ async fn sps_consumes_audio() {
 
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
-    let frames = drain_rx(&mut down_rx).await;
-    let names = frame_names(&frames);
+    // Wait for Cancel to propagate to confirm everything is through
+    down.wait_for_frame("Cancel").await;
+
+    let names = down.frame_names();
 
     // InputAudioRaw should NOT appear in output (consumed by FakeRealtime)
     assert!(
