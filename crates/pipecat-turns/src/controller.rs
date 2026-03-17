@@ -320,10 +320,9 @@ mod tests {
         UserStoppedSpeakingFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
     };
 
+    use super::*;
     use crate::start::{TranscriptionUserTurnStartStrategy, VadUserTurnStartStrategy};
     use crate::stop::SpeechTimeoutUserTurnStopStrategy;
-
-    use super::*;
 
     fn make_controller(stop_timeout_secs: f64) -> UserTurnController {
         let strategies = UserTurnStrategies {

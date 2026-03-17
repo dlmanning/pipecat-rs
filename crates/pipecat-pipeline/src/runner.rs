@@ -1,7 +1,6 @@
-use tracing::{debug, warn};
-
 use pipecat_core::error::{PipecatError, Result};
 use pipecat_core::frame::{CancelFrame, Frame};
+use tracing::{debug, warn};
 
 use crate::task::PipelineTask;
 

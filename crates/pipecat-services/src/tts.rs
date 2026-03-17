@@ -1,9 +1,8 @@
 use async_trait::async_trait;
-use tracing::trace;
-
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorContext};
+use tracing::trace;
 
 use crate::service_base::ServiceBase;
 use crate::settings::TTSSettings;

@@ -3,9 +3,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use tokio::time::timeout;
-
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::metrics::ProcessorMetrics;
@@ -13,6 +10,8 @@ use pipecat_core::node::ProcessorNode;
 use pipecat_core::observer::{FrameProcessedEvent, FramePushedEvent, PipelineObserver};
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
 use pipecat_core::test_utils::*;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 

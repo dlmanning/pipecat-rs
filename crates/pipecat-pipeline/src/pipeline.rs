@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tracing::debug;
-
 use pipecat_core::error::Result;
 use pipecat_core::frame::{Direction, FrameEnvelope};
 use pipecat_core::node::ProcessorNode;
 use pipecat_core::observer::PipelineObserver;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::debug;
 
 const CHANNEL_SIZE: usize = 64;
 
@@ -361,11 +360,13 @@ impl FrameProcessor for Pipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
     use pipecat_core::frame::*;
     use pipecat_core::test_utils::*;
-    use std::time::Duration;
     use tokio::time::timeout;
+
+    use super::*;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 

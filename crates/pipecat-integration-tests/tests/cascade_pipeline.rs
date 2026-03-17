@@ -299,9 +299,7 @@ async fn full_cascade_stt_llm_tts() {
 
 #[tokio::test]
 async fn full_cascade_with_aggregators() {
-    use pipecat_context::LLMContext;
-    use pipecat_context::LLMContextAggregatorPair;
-    use pipecat_context::LLMUserAggregatorParams;
+    use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorParams};
     use pipecat_turns::{
         SpeechTimeoutUserTurnStopStrategy, UserTurnStrategies, VadUserTurnStartStrategy,
     };

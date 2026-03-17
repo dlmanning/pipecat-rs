@@ -3,14 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tracing::debug;
-
 use pipecat_core::error::Result;
 use pipecat_core::frame::{Direction, FrameEnvelope};
 use pipecat_core::observer::PipelineObserver;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::debug;
 
 use crate::pipeline::Pipeline;
 
@@ -363,9 +362,10 @@ impl FrameProcessor for ParallelPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use pipecat_core::frame::*;
     use pipecat_core::test_utils::*;
+
+    use super::*;
 
     #[tokio::test]
     async fn two_passthrough_branches() {

@@ -3,13 +3,11 @@ mod linear;
 #[cfg(feature = "sinc-resampler")]
 mod sinc;
 
-pub use linear::LinearResampler;
-
-#[cfg(feature = "sinc-resampler")]
-pub use sinc::SincResampler;
-
 use async_trait::async_trait;
 use bytes::Bytes;
+pub use linear::LinearResampler;
+#[cfg(feature = "sinc-resampler")]
+pub use sinc::SincResampler;
 
 /// Trait for audio resamplers that convert between sample rates.
 ///

@@ -49,12 +49,14 @@ impl LLMContextAggregatorPair {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
     use pipecat_turns::{
         SpeechTimeoutUserTurnStopStrategy, UserTurnStrategies, VadUserTurnStartStrategy,
     };
     use serde_json::json;
-    use std::time::Duration;
+
+    use super::*;
 
     fn make_pair() -> LLMContextAggregatorPair {
         let context = LLMContext::new(vec![json!({"role": "system", "content": "test"})]);

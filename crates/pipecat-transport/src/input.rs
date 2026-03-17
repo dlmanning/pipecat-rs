@@ -2,14 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
-use tracing;
-
 use pipecat_audio::filter::{AudioFilter, FilterControlFrame};
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tracing;
 
 use crate::params::TransportParams;
 
@@ -335,10 +334,12 @@ impl FrameProcessor for BaseInputTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Mutex as StdMutex;
+
     use bytes::Bytes;
     use pipecat_core::test_utils::*;
-    use std::sync::Mutex as StdMutex;
+
+    use super::*;
 
     fn make_input_audio(samples: &[i16], sample_rate: u32) -> AudioRawFrame {
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();

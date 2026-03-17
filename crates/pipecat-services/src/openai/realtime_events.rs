@@ -499,8 +499,9 @@ fn u64_field(value: &serde_json::Value, key: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn session_update_event_serialization() {

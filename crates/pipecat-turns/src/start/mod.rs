@@ -3,15 +3,14 @@ mod min_words;
 mod transcription;
 mod vad;
 
-pub use external::ExternalUserTurnStartStrategy;
-pub use min_words::MinWordsUserTurnStartStrategy;
-pub use transcription::TranscriptionUserTurnStartStrategy;
-pub use vad::VadUserTurnStartStrategy;
-
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+pub use external::ExternalUserTurnStartStrategy;
+pub use min_words::MinWordsUserTurnStartStrategy;
 use pipecat_core::frame::Frame;
+pub use transcription::TranscriptionUserTurnStartStrategy;
+pub use vad::VadUserTurnStartStrategy;
 
 use crate::action::TurnAction;
 

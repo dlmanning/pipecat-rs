@@ -1,16 +1,14 @@
 use async_trait::async_trait;
 use futures::StreamExt;
-use tracing::{debug, trace, warn};
-
 use pipecat_core::error::{PipecatError, Result};
 use pipecat_core::frame::*;
 use pipecat_core::metrics::LlmTokenUsage;
 use pipecat_core::processor::{FrameProcessor, ProcessorContext};
-
-use crate::function_call::{FunctionCallParams, FunctionCallRegistry};
-use crate::llm::{LLMService, LLMServiceState, llm_process_frame};
+use tracing::{debug, trace, warn};
 
 use super::settings::OpenAILLMSettings;
+use crate::function_call::{FunctionCallParams, FunctionCallRegistry};
+use crate::llm::{LLMService, LLMServiceState, llm_process_frame};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -509,10 +507,12 @@ fn parse_usage(usage: &serde_json::Value) -> LlmTokenUsage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn parse_usage_full() {

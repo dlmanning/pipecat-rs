@@ -71,8 +71,9 @@ impl LLMContextAggregatorBase {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn make_base() -> LLMContextAggregatorBase {
         let ctx = LLMContext::new(vec![json!({"role": "system", "content": "test"})]);

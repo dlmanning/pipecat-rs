@@ -206,8 +206,9 @@ pub struct ResponseProperties {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn session_properties_skip_none_fields() {

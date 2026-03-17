@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use tracing::{debug, trace, warn};
-
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use tracing::{debug, trace, warn};
 
 use crate::aggregator::LLMContextAggregatorBase;
 use crate::context::LLMContext;
@@ -317,9 +316,10 @@ impl FrameProcessor for LLMAssistantAggregator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use pipecat_core::test_utils::run_processor;
     use serde_json::json;
+
+    use super::*;
 
     fn make_aggregator() -> LLMAssistantAggregator {
         let ctx = LLMContext::new(vec![

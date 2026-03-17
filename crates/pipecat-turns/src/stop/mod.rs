@@ -2,15 +2,14 @@ mod external;
 mod speech_timeout;
 mod turn_analyzer;
 
-pub use external::ExternalUserTurnStopStrategy;
-pub use speech_timeout::SpeechTimeoutUserTurnStopStrategy;
-pub use turn_analyzer::TurnAnalyzerUserTurnStopStrategy;
-
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+pub use external::ExternalUserTurnStopStrategy;
 use pipecat_core::frame::Frame;
 use pipecat_core::node::ProcessorNodeHandle;
+pub use speech_timeout::SpeechTimeoutUserTurnStopStrategy;
+pub use turn_analyzer::TurnAnalyzerUserTurnStopStrategy;
 
 use crate::action::TurnAction;
 

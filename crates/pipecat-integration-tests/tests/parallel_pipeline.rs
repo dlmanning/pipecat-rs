@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use pipecat_core::{frame::*, processor::FrameProcessor, test_utils::*};
+use pipecat_core::frame::*;
+use pipecat_core::processor::FrameProcessor;
+use pipecat_core::test_utils::*;
 use pipecat_pipeline::{ParallelPipeline, Pipeline};
 use tokio::time::timeout;
 

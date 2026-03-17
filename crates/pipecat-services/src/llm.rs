@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorContext};

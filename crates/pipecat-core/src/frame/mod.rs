@@ -4,12 +4,12 @@ pub mod data;
 pub mod system;
 
 // Re-export everything so callers use `frame::StartFrame` not `frame::system::StartFrame`.
+use std::fmt;
+
 pub use common::*;
 pub use control::*;
 pub use data::*;
 pub use system::*;
-
-use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Frame enum

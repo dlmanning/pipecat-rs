@@ -4,17 +4,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use pipecat_core::error::{PipecatError, Result};
+use pipecat_core::frame::*;
+use pipecat_core::processor::{FrameProcessor, ProcessorContext};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
-use pipecat_core::error::{PipecatError, Result};
-use pipecat_core::frame::*;
-use pipecat_core::processor::{FrameProcessor, ProcessorContext};
-
-use crate::stt::{STTService, STTServiceState, stt_process_frame};
-
 use super::settings::DeepgramSTTSettings;
+use crate::stt::{STTService, STTServiceState, stt_process_frame};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -410,8 +408,9 @@ fn extract_host(url: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn parse_results_final_transcription() {

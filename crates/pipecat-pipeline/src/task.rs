@@ -4,15 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Notify, mpsc};
-use tokio::task::JoinHandle;
-use tracing::{debug, error, warn};
-
 use pipecat_core::error::{PipecatError, Result};
 use pipecat_core::frame::*;
 use pipecat_core::node::ProcessorNode;
 use pipecat_core::observer::PipelineObserver;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use tokio::sync::{Notify, mpsc};
+use tokio::task::JoinHandle;
+use tracing::{debug, error, warn};
 
 use crate::pipeline::Pipeline;
 
@@ -664,9 +663,11 @@ async fn heartbeat_monitor(mut rx: mpsc::Receiver<HeartbeatFrame>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use pipecat_core::test_utils::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    use pipecat_core::test_utils::*;
+
+    use super::*;
 
     #[tokio::test]
     async fn basic_lifecycle() {
@@ -1082,7 +1083,7 @@ mod tests {
         let flag_clone = flag.clone();
 
         let pipeline = Pipeline::new(vec![Box::new(PassthroughProcessor::new())]);
-        let mut task = PipelineTask::new(
+        let task = PipelineTask::new(
             Box::new(pipeline),
             PipelineParams {
                 enable_heartbeats: false,

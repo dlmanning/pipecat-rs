@@ -137,8 +137,9 @@ fn apply_u32(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn llm_settings_partial_delta() {

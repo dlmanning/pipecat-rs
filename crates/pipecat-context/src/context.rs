@@ -95,8 +95,9 @@ impl LLMContext {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn new_context_with_messages() {

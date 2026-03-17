@@ -3,10 +3,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
-
 use pipecat_core::frame::{Direction, Frame, MetricsData};
 use pipecat_core::observer::{FramePushedEvent, PipelineObserver};
+use tokio::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Breakdown types
@@ -399,15 +398,18 @@ impl UserBotLatencyObserver {
         let mut emit_breakdown = false;
 
         // One-time first bot speech measurement (client connect → first speech)
-        let first_speech_latency =
-            if state.client_connected_time.is_some() && !state.first_bot_speech_measured {
+        let first_speech_latency = if let Some(connected_time) = state.client_connected_time {
+            if !state.first_bot_speech_measured {
                 state.first_bot_speech_measured = true;
-                let latency = now - state.client_connected_time.unwrap();
+                let latency = now - connected_time;
                 emit_breakdown = true;
                 Some(latency)
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // User-to-bot latency
         let user_latency = if let Some(stopped) = state.user_stopped_time.take() {
@@ -444,8 +446,9 @@ impl UserBotLatencyObserver {
 mod tests {
     use std::time::Instant;
 
-    use super::*;
     use pipecat_core::frame::*;
+
+    use super::*;
 
     /// Test handler that records all events.
     struct TestHandler {

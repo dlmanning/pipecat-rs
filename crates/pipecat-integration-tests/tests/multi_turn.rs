@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-
 use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorParams};
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;

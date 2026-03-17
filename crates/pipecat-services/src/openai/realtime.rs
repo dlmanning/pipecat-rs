@@ -12,18 +12,16 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tokio::task::JoinHandle;
-use tracing::{debug, trace, warn};
-
 use pipecat_core::error::{PipecatError, Result};
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorContext};
-
-use crate::function_call::{FunctionCallParams, FunctionCallRegistry};
-use crate::service_base::ServiceBase;
+use tokio::task::JoinHandle;
+use tracing::{debug, trace, warn};
 
 use super::realtime_events::{self, ServerEvent, calculate_audio_duration_ms};
 use super::settings::{OpenAIRealtimeSettings, ResponseProperties, SessionProperties};
+use crate::function_call::{FunctionCallParams, FunctionCallRegistry};
+use crate::service_base::ServiceBase;
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1331,8 +1329,9 @@ fn extract_host(url: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn context_message_to_item_user() {
