@@ -1,0 +1,40 @@
+[workspace]
+members = [
+    "crates/pipecat-core",
+    "crates/pipecat-pipeline",
+    "crates/pipecat-transport",
+    "crates/pipecat-audio",
+    "crates/pipecat-turns",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+repository = "https://github.com/pipecat-ai/pipecat-rs"
+
+[workspace.dependencies]
+# Internal crates
+pipecat-core = { path = "crates/pipecat-core" }
+pipecat-pipeline = { path = "crates/pipecat-pipeline" }
+pipecat-transport = { path = "crates/pipecat-transport" }
+pipecat-audio = { path = "crates/pipecat-audio" }
+pipecat-turns = { path = "crates/pipecat-turns" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Data
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Utilities
+thiserror = "2"
