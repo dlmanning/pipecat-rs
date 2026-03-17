@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
+use crate::error::Result;
 use crate::frame::*;
 use crate::node::{ProcessorNode, ProcessorNodeHandle};
 use crate::observer::PipelineObserver;
@@ -120,8 +121,8 @@ impl FrameProcessor for PassthroughProcessor {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
-        ctx.push_frame(envelope, direction).await.ok();
+    ) -> Result<()> {
+        ctx.push_frame(envelope, direction).await
     }
     async fn cleanup(&mut self) {
         self.cleaned_up.store(true, Ordering::SeqCst);
@@ -160,8 +161,9 @@ impl FrameProcessor for CollectorProcessor {
         envelope: FrameEnvelope,
         _direction: Direction,
         _ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         self.frames.lock().unwrap().push(envelope);
+        Ok(())
     }
 }
 
@@ -197,12 +199,12 @@ impl FrameProcessor for RecorderProcessor {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         self.frames
             .lock()
             .unwrap()
             .push(format!("{}", envelope.frame));
-        ctx.push_frame(envelope, direction).await.ok();
+        ctx.push_frame(envelope, direction).await
     }
 }
 
@@ -238,15 +240,16 @@ impl FrameProcessor for ErrorOnTextProcessor {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match &envelope.frame {
             Frame::Text(_) => {
-                ctx.push_error("text not allowed", false).await.ok();
+                ctx.push_error("text not allowed", false).await?;
             }
             _ => {
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
         }
+        Ok(())
     }
 }
 
@@ -282,16 +285,60 @@ impl FrameProcessor for UppercaseProcessor {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match &envelope.frame {
             Frame::Text(t) => {
                 ctx.send_downstream(Frame::Text(TextFrame::new(t.text.to_uppercase())))
-                    .await
-                    .ok();
+                    .await?;
             }
             _ => {
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
+        }
+        Ok(())
+    }
+}
+
+/// Returns Err from process_frame on Text frames. For testing auto error catching.
+pub struct FailingProcessor {
+    base: ProcessorBase,
+}
+
+impl FailingProcessor {
+    pub fn new() -> Self {
+        Self {
+            base: ProcessorBase::new("Failing"),
+        }
+    }
+}
+
+impl Default for FailingProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl FrameProcessor for FailingProcessor {
+    fn name(&self) -> &str {
+        self.base.name()
+    }
+    fn id(&self) -> u64 {
+        self.base.id()
+    }
+    async fn process_frame(
+        &mut self,
+        envelope: FrameEnvelope,
+        direction: Direction,
+        ctx: &ProcessorContext,
+    ) -> Result<()> {
+        match &envelope.frame {
+            Frame::Text(_) => {
+                Err(crate::error::PipecatError::ProcessorError(
+                    "intentional failure".into(),
+                ))
+            }
+            _ => ctx.push_frame(envelope, direction).await,
         }
     }
 }
@@ -378,7 +425,7 @@ pub async fn run_processor(
     let ctx = ProcessorContext::new(down_tx, up_tx, processor.id(), processor.name().to_string());
 
     for (frame, direction) in inputs {
-        processor
+        let _ = processor
             .process_frame(FrameEnvelope::new(frame), direction, &ctx)
             .await;
     }

@@ -77,6 +77,23 @@ pub struct AudioRawFrame {
     pub num_channels: u16,
 }
 
+impl AudioRawFrame {
+    /// Number of audio frames (samples per channel).
+    /// Matches Python's `len(audio) / (num_channels * 2)`.
+    pub fn num_frames(&self) -> usize {
+        audio_num_frames(self.audio.len(), self.num_channels)
+    }
+}
+
+/// Compute the number of audio frames (samples per channel) from the byte
+/// length and channel count. Assumes 16-bit (2-byte) samples.
+pub fn audio_num_frames(audio_len: usize, num_channels: u16) -> usize {
+    if num_channels == 0 {
+        return 0;
+    }
+    audio_len / (num_channels as usize * 2)
+}
+
 /// Raw image payload.
 #[derive(Debug, Clone)]
 pub struct ImageRawFrame {

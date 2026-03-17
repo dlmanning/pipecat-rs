@@ -17,6 +17,13 @@ pub struct TTSAudioRawFrame {
     pub context_id: Option<String>,
 }
 
+impl TTSAudioRawFrame {
+    /// Number of audio frames (samples per channel).
+    pub fn num_frames(&self) -> usize {
+        super::common::audio_num_frames(self.audio.len(), self.num_channels)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Image output
 // ---------------------------------------------------------------------------
@@ -166,6 +173,14 @@ pub struct LLMContextFrame {
 // Function call result (data + uninterruptible)
 // ---------------------------------------------------------------------------
 
+/// Properties for configuring function call result behavior.
+#[derive(Debug, Clone, Default)]
+pub struct FunctionCallResultProperties {
+    /// Whether to run the LLM after receiving this result.
+    /// Overrides `FunctionCallResultFrame::run_llm` when set.
+    pub run_llm: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionCallResultFrame {
     pub function_name: String,
@@ -173,6 +188,7 @@ pub struct FunctionCallResultFrame {
     pub arguments: serde_json::Value,
     pub result: serde_json::Value,
     pub run_llm: Option<bool>,
+    pub properties: Option<FunctionCallResultProperties>,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +239,18 @@ impl std::fmt::Display for KeypadEntry {
         };
         f.write_char(c)
     }
+}
+
+/// Text that has been aggregated from multiple frames (e.g., sentence-level).
+#[derive(Debug, Clone)]
+pub struct AggregatedTextFrame {
+    pub text: String,
+    /// Label identifying the aggregation strategy (e.g., "sentence", "token").
+    pub aggregated_by: String,
+    pub context_id: Option<String>,
+    pub skip_tts: Option<bool>,
+    pub includes_inter_frame_spaces: bool,
+    pub append_to_context: bool,
 }
 
 /// DTMF tone output (queued through audio pipeline for ordering).

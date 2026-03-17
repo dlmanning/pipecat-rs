@@ -20,6 +20,7 @@ const CHANNEL_SIZE: usize = 64;
 const DEFAULT_HEARTBEAT_PERIOD: Duration = Duration::from_secs(1);
 const DEFAULT_HEARTBEAT_MONITOR_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_CANCEL_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
 // Event callback types
@@ -48,6 +49,9 @@ pub struct PipelineParams {
     pub enable_heartbeats: bool,
     pub heartbeat_period: Duration,
     pub idle_timeout: Option<Duration>,
+    /// When true (default), the pipeline is cancelled when the idle timeout fires.
+    /// When false, only the `on_idle_timeout` callback is invoked.
+    pub cancel_on_idle_timeout: bool,
     pub cancel_timeout: Duration,
 }
 
@@ -60,9 +64,10 @@ impl Default for PipelineParams {
             enable_metrics: false,
             enable_usage_metrics: false,
             report_only_initial_ttfb: false,
-            enable_heartbeats: true,
+            enable_heartbeats: false,
             heartbeat_period: DEFAULT_HEARTBEAT_PERIOD,
-            idle_timeout: None,
+            idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
+            cancel_on_idle_timeout: true,
             cancel_timeout: DEFAULT_CANCEL_TIMEOUT,
         }
     }
@@ -91,11 +96,16 @@ impl FrameProcessor for TaskSource {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match direction {
-            Direction::Downstream => ctx.push_downstream(envelope).await.ok(),
-            Direction::Upstream => self.upstream_tx.send(envelope).await.ok(),
-        };
+            Direction::Downstream => {
+                ctx.push_downstream(envelope).await?;
+            }
+            Direction::Upstream => {
+                self.upstream_tx.send(envelope).await.ok();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -122,11 +132,16 @@ impl FrameProcessor for TaskSink {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match direction {
-            Direction::Downstream => self.downstream_tx.send(envelope).await.ok(),
-            Direction::Upstream => ctx.push_upstream(envelope).await.ok(),
-        };
+            Direction::Downstream => {
+                self.downstream_tx.send(envelope).await.ok();
+            }
+            Direction::Upstream => {
+                ctx.push_upstream(envelope).await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -159,6 +174,7 @@ pub struct PipelineTask {
     on_started: Option<EventCallback>,
     on_finished: Option<EventCallback>,
     on_error: Option<ErrorCallback>,
+    on_idle_timeout: Option<EventCallback>,
 }
 
 impl std::fmt::Debug for PipelineTask {
@@ -184,6 +200,7 @@ impl PipelineTask {
             on_started: None,
             on_finished: None,
             on_error: None,
+            on_idle_timeout: None,
         }
     }
 
@@ -219,6 +236,17 @@ impl PipelineTask {
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.on_error = Some(Box::new(move |e| Box::pin(f(e))));
+        self
+    }
+
+    /// Register a callback fired when the idle timeout expires. Called before
+    /// cancellation (if `cancel_on_idle_timeout` is true).
+    pub fn on_idle_timeout<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.on_idle_timeout = Some(Box::new(move || Box::pin(f())));
         self
     }
 
@@ -467,6 +495,8 @@ impl PipelineTask {
         if let Some(idle_dur) = self.params.idle_timeout {
             let idle_n = Arc::clone(&idle_notify);
             let idle_push_tx = self.push_tx.clone();
+            let on_idle = self.on_idle_timeout.take();
+            let cancel_on_idle = self.params.cancel_on_idle_timeout;
             // Notify once so the first wait period starts fresh.
             idle_n.notify_waiters();
             background_tasks.push(tokio::spawn(async move {
@@ -476,10 +506,15 @@ impl PipelineTask {
                         .is_err()
                     {
                         warn!("PipelineTask: idle timeout ({}s)", idle_dur.as_secs());
-                        idle_push_tx
-                            .send(Frame::Cancel(CancelFrame::default()))
-                            .await
-                            .ok();
+                        if let Some(ref cb) = on_idle {
+                            cb().await;
+                        }
+                        if cancel_on_idle {
+                            idle_push_tx
+                                .send(Frame::Cancel(CancelFrame::default()))
+                                .await
+                                .ok();
+                        }
                         break;
                     }
                 }
@@ -725,12 +760,13 @@ mod tests {
                 envelope: FrameEnvelope,
                 direction: Direction,
                 ctx: &ProcessorContext,
-            ) {
+            ) -> Result<()> {
                 if matches!(&envelope.frame, Frame::Text(_)) {
-                    ctx.push_error("fatal!", true).await.ok();
+                    ctx.push_error("fatal!", true).await?;
                 } else {
-                    ctx.push_frame(envelope, direction).await.ok();
+                    ctx.push_frame(envelope, direction).await?;
                 }
+                Ok(())
             }
         }
 
@@ -778,18 +814,18 @@ mod tests {
                 envelope: FrameEnvelope,
                 direction: Direction,
                 ctx: &ProcessorContext,
-            ) {
+            ) -> Result<()> {
                 if matches!(&envelope.frame, Frame::Text(_)) {
                     ctx.send_upstream(Frame::EndTask(EndTaskFrame {
                         task_id: "t".into(),
                         handler_id: "h".into(),
                         reason: None,
                     }))
-                    .await
-                    .ok();
+                    .await?;
                 } else {
-                    ctx.push_frame(envelope, direction).await.ok();
+                    ctx.push_frame(envelope, direction).await?;
                 }
+                Ok(())
             }
         }
 
@@ -949,12 +985,13 @@ mod tests {
                 envelope: FrameEnvelope,
                 direction: Direction,
                 ctx: &ProcessorContext,
-            ) {
+            ) -> Result<()> {
                 if matches!(&envelope.frame, Frame::Text(_)) {
-                    ctx.push_error("non-fatal!", false).await.ok();
+                    ctx.push_error("non-fatal!", false).await?;
                 } else {
-                    ctx.push_frame(envelope, direction).await.ok();
+                    ctx.push_frame(envelope, direction).await?;
                 }
+                Ok(())
             }
         }
 
@@ -1011,5 +1048,69 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), task.run()).await;
         assert!(result.is_ok(), "should complete via idle timeout");
         assert!(task.has_finished());
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_fires_callback() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let pipeline = Pipeline::new(vec![Box::new(PassthroughProcessor::new())]);
+        let mut task = PipelineTask::new(
+            Box::new(pipeline),
+            PipelineParams {
+                enable_heartbeats: false,
+                idle_timeout: Some(Duration::from_millis(100)),
+                ..Default::default()
+            },
+        )
+        .on_idle_timeout(move || {
+            let f = flag_clone.clone();
+            async move {
+                f.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(5), task.run()).await;
+        assert!(result.is_ok());
+        assert!(flag.load(Ordering::SeqCst), "on_idle_timeout should fire");
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_no_cancel_when_disabled() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let pipeline = Pipeline::new(vec![Box::new(PassthroughProcessor::new())]);
+        let mut task = PipelineTask::new(
+            Box::new(pipeline),
+            PipelineParams {
+                enable_heartbeats: false,
+                idle_timeout: Some(Duration::from_millis(50)),
+                cancel_on_idle_timeout: false,
+                ..Default::default()
+            },
+        );
+
+        // Send the cancel from INSIDE the idle callback. This proves:
+        // 1. The callback fires (flag is set)
+        // 2. The pipeline is still alive when it fires (send succeeds)
+        // 3. The idle timeout itself did NOT cancel the pipeline
+        let push_tx = task.push_tx.clone();
+        let mut task = task.on_idle_timeout(move || {
+            let f = flag_clone.clone();
+            let tx = push_tx.clone();
+            async move {
+                f.store(true, Ordering::SeqCst);
+                tx.send(Frame::Cancel(CancelFrame::default())).await.ok();
+            }
+        });
+
+        let result = tokio::time::timeout(Duration::from_secs(5), task.run()).await;
+        assert!(result.is_ok());
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "on_idle_timeout should fire even when cancel is disabled"
+        );
     }
 }

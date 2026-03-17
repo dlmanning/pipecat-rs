@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
+use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::metrics::ProcessorMetrics;
 use pipecat_core::node::ProcessorNode;
@@ -87,19 +88,20 @@ impl FrameProcessor for MetricsEmittingProcessor {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match &envelope.frame {
             Frame::Text(_) => {
                 // Simulate TTFB: start when we get text, immediately stop
                 self.metrics.start_ttfb();
-                ctx.push_ttfb(&mut self.metrics).await.ok();
+                ctx.push_ttfb(&mut self.metrics).await?;
                 // Forward the text too
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
             _ => {
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
         }
+        Ok(())
     }
 }
 
@@ -620,8 +622,9 @@ impl FrameProcessor for HookTracker {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
-        ctx.push_frame(envelope, direction).await.ok();
+    ) -> Result<()> {
+        ctx.push_frame(envelope, direction).await?;
+        Ok(())
     }
     async fn on_before_process(&mut self, frame: &Frame, _direction: Direction) {
         self.before_count
@@ -918,11 +921,12 @@ impl FrameProcessor for SetupTracker {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         if !self.setup_done.load(Ordering::SeqCst) {
             self.frames_before_setup.fetch_add(1, Ordering::SeqCst);
         }
-        ctx.push_frame(envelope, direction).await.ok();
+        ctx.push_frame(envelope, direction).await?;
+        Ok(())
     }
 }
 

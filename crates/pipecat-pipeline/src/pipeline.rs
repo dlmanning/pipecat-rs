@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
+use pipecat_core::error::Result;
 use pipecat_core::frame::{Direction, FrameEnvelope};
 use pipecat_core::node::ProcessorNode;
 use pipecat_core::observer::PipelineObserver;
@@ -67,15 +68,16 @@ impl FrameProcessor for PipelineSource {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match direction {
             Direction::Downstream => {
-                ctx.push_downstream(envelope).await.ok();
+                ctx.push_downstream(envelope).await?;
             }
             Direction::Upstream => {
                 self.escape_tx.send(envelope).await.ok();
             }
         }
+        Ok(())
     }
 }
 
@@ -104,15 +106,16 @@ impl FrameProcessor for PipelineSink {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match direction {
             Direction::Downstream => {
                 self.escape_tx.send(envelope).await.ok();
             }
             Direction::Upstream => {
-                ctx.push_upstream(envelope).await.ok();
+                ctx.push_upstream(envelope).await?;
             }
         }
+        Ok(())
     }
 }
 
@@ -307,7 +310,7 @@ impl FrameProcessor for Pipeline {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         // Lazy initialization on first frame.
         if matches!(self.state, PipelineState::Idle(_)) {
             self.initialize(ctx);
@@ -331,6 +334,7 @@ impl FrameProcessor for Pipeline {
                 debug!("Pipeline: frame received in non-running state, dropping");
             }
         }
+        Ok(())
     }
 
     async fn cleanup(&mut self) {

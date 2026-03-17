@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use tracing;
 
 use pipecat_audio::filter::{AudioFilter, FilterControlFrame};
+use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
 
@@ -268,30 +269,30 @@ impl FrameProcessor for BaseInputTransport {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match &envelope.frame {
             Frame::Start(frame) => {
                 // Push StartFrame downstream first, then initialize.
                 let frame = frame.clone();
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
                 self.start(&frame, ctx).await;
             }
 
             Frame::End(_) => {
                 // Push EndFrame downstream first, then stop.
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
                 self.stop().await;
             }
 
             Frame::Cancel(_) => {
                 // Cancel first, then push CancelFrame downstream.
                 self.cancel().await;
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
 
             Frame::Stop(_) => {
                 // Push StopFrame downstream, then pause.
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
                 self.pause().await;
             }
 
@@ -304,7 +305,7 @@ impl FrameProcessor for BaseInputTransport {
                         .await;
                 }
                 // Forward downstream so other processors with filters also get it.
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
 
             Frame::FilterEnable(f) => {
@@ -316,14 +317,15 @@ impl FrameProcessor for BaseInputTransport {
                         .await;
                 }
                 // Forward downstream.
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
 
             _ => {
                 // Forward everything else in the same direction.
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
         }
+        Ok(())
     }
 }
 
@@ -510,7 +512,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         transport.set_transport_ready().await;
 
@@ -550,7 +553,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         transport.set_transport_ready().await;
 
@@ -592,7 +596,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Pause via StopFrame.
@@ -602,7 +607,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Push audio while paused — should be dropped.
         let audio = make_input_audio(&[100], 16000);
@@ -649,7 +655,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Push audio via the public API — filter runs inside the audio task.
@@ -699,7 +706,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Push audio — filter returns empty, so no frame downstream.
@@ -742,7 +750,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Send FilterUpdateSettings — should be forwarded downstream.
         transport
@@ -753,7 +762,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         let mut frames = Vec::new();
         while let Ok(env) = down_rx.try_recv() {

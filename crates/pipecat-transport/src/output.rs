@@ -12,6 +12,7 @@ use pipecat_audio::{
     resampler::AudioResampler,
 };
 use pipecat_core::{
+    error::Result,
     frame::*,
     processor::{FrameProcessor, ProcessorBase, ProcessorContext},
 };
@@ -1304,28 +1305,28 @@ impl FrameProcessor for BaseOutputTransport {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         match &envelope.frame {
             Frame::Start(frame) => {
                 let frame = frame.clone();
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
                 self.start(&frame, ctx).await;
             }
 
             Frame::End(_) => {
                 self.stop().await;
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
 
             Frame::Cancel(_) => {
                 self.cancel().await;
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
             }
 
             Frame::Interruption(_) => {
                 let dest = envelope.header.transport_destination.clone();
                 let allow = self.allow_interruptions;
-                ctx.push_frame(envelope, direction).await.ok();
+                ctx.push_frame(envelope, direction).await?;
                 if let Some(sender) = self.get_sender_mut(&dest) {
                     sender.handle_interruptions(allow, ctx).await;
                 }
@@ -1402,16 +1403,16 @@ impl FrameProcessor for BaseOutputTransport {
 
             _ => {
                 if direction == Direction::Upstream {
-                    ctx.push_upstream(envelope).await.ok();
+                    ctx.push_upstream(envelope).await?;
                 } else if envelope.frame.is_system() {
-                    ctx.push_frame(envelope, direction).await.ok();
+                    ctx.push_frame(envelope, direction).await?;
                 } else if envelope.header.pts.is_some() {
                     // Frames with presentation timestamps go through the clock task.
                     let dest = envelope.header.transport_destination.clone();
                     if let Some(sender) = self.get_sender(&dest) {
                         sender.handle_timed_frame(envelope).await;
                     } else {
-                        ctx.push_frame(envelope, direction).await.ok();
+                        ctx.push_frame(envelope, direction).await?;
                     }
                 } else {
                     // Other downstream frames go through audio queue for ordering.
@@ -1419,11 +1420,12 @@ impl FrameProcessor for BaseOutputTransport {
                     if let Some(sender) = self.get_sender(&dest) {
                         sender.enqueue_sync_frame(envelope).await;
                     } else {
-                        ctx.push_frame(envelope, direction).await.ok();
+                        ctx.push_frame(envelope, direction).await?;
                     }
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -1620,7 +1622,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(transport.audio_chunk_size(), 320);
 
@@ -1635,7 +1638,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Give audio task time to process.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1689,7 +1693,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send TTS audio (exactly one chunk = 160 i16 samples = 320 bytes).
@@ -1700,7 +1705,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1762,7 +1768,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send TTS audio to trigger BotStartedSpeaking.
@@ -1773,7 +1780,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1784,7 +1792,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -1847,7 +1856,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send TTS audio to get bot speaking.
@@ -1858,7 +1868,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1869,7 +1880,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1924,7 +1936,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         let mut upstream = Vec::new();
@@ -1986,7 +1999,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send EndFrame.
@@ -1996,7 +2010,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         // Wait for the audio task to process EndFrame and send silence.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2087,7 +2102,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send a frame with pts=0 (should deliver immediately).
@@ -2102,7 +2118,8 @@ mod tests {
         env.header.pts = Some(0);
         transport
             .process_frame(env, Direction::Downstream, &ctx)
-            .await;
+            .await
+            .unwrap();
 
         // Give clock task time to deliver.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2152,7 +2169,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Stop should send EndFrame to clock task and it should terminate.
@@ -2209,7 +2227,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send a Sprite frame with 2 images.
@@ -2218,7 +2237,8 @@ mod tests {
         });
         transport
             .process_frame(FrameEnvelope::new(sprite), Direction::Downstream, &ctx)
-            .await;
+            .await
+            .unwrap();
 
         // Wait for cycling task to produce some frames (~200ms at 30fps = ~6 frames).
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2267,7 +2287,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send OutputImageRaw frames.
@@ -2275,7 +2296,8 @@ mod tests {
             let frame = Frame::OutputImageRaw(make_test_image(i + 10));
             transport
                 .process_frame(FrameEnvelope::new(frame), Direction::Downstream, &ctx)
-                .await;
+                .await
+                .unwrap();
         }
 
         // Wait for live task to process.
@@ -2323,7 +2345,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send video frame — should be ignored.
@@ -2333,7 +2356,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -2376,7 +2400,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send a single OutputImageRaw (sets a single image for cycling).
@@ -2386,7 +2411,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -2433,7 +2459,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Send AssistantImageRaw — should set cycling image AND enqueue for downstream.
@@ -2446,7 +2473,8 @@ mod tests {
         });
         transport
             .process_frame(FrameEnvelope::new(frame), Direction::Downstream, &ctx)
-            .await;
+            .await
+            .unwrap();
 
         // Wait for cycling and audio task to process.
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2506,7 +2534,8 @@ mod tests {
                 Direction::Downstream,
                 &ctx,
             )
-            .await;
+            .await
+            .unwrap();
         transport.set_transport_ready().await;
 
         // Should have 2 senders: None (default) and Some("dest1").

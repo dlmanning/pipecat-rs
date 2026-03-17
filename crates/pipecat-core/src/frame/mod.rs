@@ -75,6 +75,7 @@ pub enum Frame {
 
     // System-priority DTMF
     OutputDTMFUrgent(OutputDTMFUrgentFrame),
+    InputDTMF(InputDTMFFrame),
 
     // ==== Data frames (normal priority, interruptible) ====
     OutputAudioRaw(AudioRawFrame),
@@ -87,7 +88,7 @@ pub enum Frame {
 
     Text(TextFrame),
     LLMText(TextFrame),
-    TTSText(TextFrame),
+    TTSText(AggregatedTextFrame),
     Transcription(TranscriptionFrame),
     InterimTranscription(InterimTranscriptionFrame),
     Translation(TranslationFrame),
@@ -110,6 +111,8 @@ pub enum Frame {
     OutputTransportMessage(OutputTransportMessageFrame),
 
     OutputDTMF(OutputDTMFFrame),
+
+    AggregatedText(AggregatedTextFrame),
 
     // ==== Control frames (normal priority) ====
     End(EndFrame),                                         // uninterruptible
@@ -146,6 +149,7 @@ pub enum Frame {
     MixerEnable(MixerEnableFrame),
 
     ServiceSwitcherRequestMetadata(ServiceSwitcherRequestMetadataFrame),
+    ManuallySwitchService(ManuallySwitchServiceFrame),
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +200,7 @@ impl fmt::Display for Frame {
             Frame::StopTask(_) => "StopTask",
             Frame::InterruptionTask(_) => "InterruptionTask",
             Frame::OutputDTMFUrgent(_) => "OutputDTMFUrgent",
+            Frame::InputDTMF(_) => "InputDTMF",
             Frame::OutputAudioRaw(_) => "OutputAudioRaw",
             Frame::TTSAudioRaw(_) => "TTSAudioRaw",
             Frame::SpeechOutputAudioRaw(_) => "SpeechOutputAudioRaw",
@@ -223,6 +228,7 @@ impl fmt::Display for Frame {
             Frame::FunctionCallResult(_) => "FunctionCallResult",
             Frame::OutputTransportMessage(_) => "OutputTransportMessage",
             Frame::OutputDTMF(_) => "OutputDTMF",
+            Frame::AggregatedText(_) => "AggregatedText",
             Frame::End(_) => "End",
             Frame::Stop(_) => "Stop",
             Frame::FunctionCallInProgress(_) => "FunctionCallInProgress",
@@ -252,6 +258,7 @@ impl fmt::Display for Frame {
             Frame::MixerUpdateSettings(_) => "MixerUpdateSettings",
             Frame::MixerEnable(_) => "MixerEnable",
             Frame::ServiceSwitcherRequestMetadata(_) => "ServiceSwitcherRequestMetadata",
+            Frame::ManuallySwitchService(_) => "ManuallySwitchService",
         };
         f.write_str(name)
     }
@@ -304,6 +311,7 @@ impl Frame {
                 | Frame::StopTask(_)
                 | Frame::InterruptionTask(_)
                 | Frame::OutputDTMFUrgent(_)
+                | Frame::InputDTMF(_)
         )
     }
 
@@ -337,6 +345,7 @@ impl Frame {
                 | Frame::FunctionCallResult(_)
                 | Frame::OutputTransportMessage(_)
                 | Frame::OutputDTMF(_)
+                | Frame::AggregatedText(_)
         )
     }
 
@@ -372,6 +381,7 @@ impl Frame {
                 | Frame::MixerUpdateSettings(_)
                 | Frame::MixerEnable(_)
                 | Frame::ServiceSwitcherRequestMetadata(_)
+                | Frame::ManuallySwitchService(_)
         )
     }
 
@@ -443,6 +453,7 @@ impl Frame {
             Frame::StopTask(_) => {}
             Frame::InterruptionTask(_) => {}
             Frame::OutputDTMFUrgent(_) => {}
+            Frame::InputDTMF(_) => {}
             // Data
             Frame::OutputAudioRaw(_) => {}
             Frame::TTSAudioRaw(_) => {}
@@ -471,6 +482,7 @@ impl Frame {
             Frame::FunctionCallResult(_) => {}
             Frame::OutputTransportMessage(_) => {}
             Frame::OutputDTMF(_) => {}
+            Frame::AggregatedText(_) => {}
             // Control
             Frame::End(_) => {}
             Frame::Stop(_) => {}
@@ -501,6 +513,7 @@ impl Frame {
             Frame::MixerUpdateSettings(_) => {}
             Frame::MixerEnable(_) => {}
             Frame::ServiceSwitcherRequestMetadata(_) => {}
+            Frame::ManuallySwitchService(_) => {}
         }
     }
 }

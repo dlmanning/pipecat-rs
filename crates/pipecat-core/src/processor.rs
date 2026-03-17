@@ -255,24 +255,25 @@ impl ProcessorContext {
 ///
 /// **Forward everything (passthrough):**
 /// ```ignore
-/// async fn process_frame(&mut self, envelope: FrameEnvelope, direction: Direction, ctx: &ProcessorContext) {
-///     ctx.push_frame(envelope, direction).await.ok();
+/// async fn process_frame(&mut self, envelope: FrameEnvelope, direction: Direction, ctx: &ProcessorContext) -> Result<()> {
+///     ctx.push_frame(envelope, direction).await
 /// }
 /// ```
 ///
 /// **Handle specific frames, forward the rest:**
 /// ```ignore
-/// async fn process_frame(&mut self, envelope: FrameEnvelope, direction: Direction, ctx: &ProcessorContext) {
+/// async fn process_frame(&mut self, envelope: FrameEnvelope, direction: Direction, ctx: &ProcessorContext) -> Result<()> {
 ///     match &envelope.frame {
 ///         Frame::Text(t) => {
 ///             // Transform and send a new frame
-///             ctx.send_downstream(Frame::Text(TextFrame::new(t.text.to_uppercase()))).await.ok();
+///             ctx.send_downstream(Frame::Text(TextFrame::new(t.text.to_uppercase()))).await?;
 ///         }
 ///         _ => {
 ///             // Forward everything else unchanged
-///             ctx.push_frame(envelope, direction).await.ok();
+///             ctx.push_frame(envelope, direction).await?;
 ///         }
 ///     }
+///     Ok(())
 /// }
 /// ```
 ///
@@ -296,12 +297,16 @@ pub trait FrameProcessor: Send + Sync {
     /// Process a single frame. Called by the ProcessorNode for every frame
     /// that reaches this processor. The processor should either handle the
     /// frame (producing output via `ctx`) or forward it unchanged.
+    ///
+    /// Return `Ok(())` on success. If `Err` is returned, the ProcessorNode
+    /// automatically pushes a non-fatal `ErrorFrame` upstream, matching
+    /// Python's try/except behavior in `FrameProcessor.__process_frame()`.
     async fn process_frame(
         &mut self,
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    );
+    ) -> Result<()>;
 
     /// Called once before the processor starts receiving frames.
     /// Override to perform one-time initialization: open connections,

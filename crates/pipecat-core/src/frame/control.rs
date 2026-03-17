@@ -172,6 +172,12 @@ pub struct ServiceSwitcherRequestMetadataFrame {
     pub service_name: String,
 }
 
+/// Manually switch to a named service processor.
+#[derive(Debug, Clone)]
+pub struct ManuallySwitchServiceFrame {
+    pub service_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Vision (aliases for LLM response frames)
 // ---------------------------------------------------------------------------

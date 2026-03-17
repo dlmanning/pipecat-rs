@@ -337,6 +337,13 @@ impl ProcessorNode {
             }
 
             Frame::Interruption(_) => {
+                // NOTE: Python tracks __process_current_frame to skip task
+                // cancellation if the currently-dispatching frame is
+                // uninterruptible. In Rust, this is safe-by-design: dispatch()
+                // runs sequentially in the select! loop, so the
+                // currently-dispatching frame always completes before the next
+                // iteration processes the InterruptionFrame. The drain only
+                // affects queued frames, never the in-progress one.
                 trace!(
                     processor = self.processor.name(),
                     "InterruptionFrame received, draining normal queue"
@@ -400,9 +407,21 @@ impl ProcessorNode {
             .on_before_process(&msg.envelope.frame, msg.direction)
             .await;
 
-        self.processor
+        if let Err(e) = self
+            .processor
             .process_frame(msg.envelope, msg.direction, &self.ctx)
-            .await;
+            .await
+        {
+            tracing::error!(
+                processor = self.processor.name(),
+                error = %e,
+                "process_frame returned error, pushing ErrorFrame upstream"
+            );
+            let _ = self
+                .ctx
+                .push_error(&format!("Error processing frame: {e}"), false)
+                .await;
+        }
 
         self.processor.on_after_process().await;
     }
@@ -838,6 +857,7 @@ mod tests {
                     arguments: serde_json::Value::Null,
                     result: serde_json::json!({"temp": 72}),
                     run_llm: Some(true),
+                    properties: None,
                 })),
                 Direction::Downstream,
             )
@@ -1529,6 +1549,83 @@ mod tests {
             pushed.contains(&"Error".to_string()),
             "observer should see Error pushed upstream: {:?}",
             *pushed
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto error catching
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn process_frame_err_produces_error_frame_upstream() {
+        let (node, handle, mut down_rx, mut up_rx) =
+            make_node(Box::new(FailingProcessor::new()));
+
+        let run = tokio::spawn(async move { node.run().await });
+
+        send_and_settle(
+            &handle,
+            Frame::Start(StartFrame::default()),
+            Direction::Downstream,
+        )
+        .await;
+
+        // Text triggers Err in FailingProcessor
+        send_and_settle(
+            &handle,
+            Frame::Text(TextFrame::new("will fail")),
+            Direction::Downstream,
+        )
+        .await;
+
+        // Non-text is forwarded normally
+        send_and_settle(
+            &handle,
+            Frame::Interruption(InterruptionFrame),
+            Direction::Downstream,
+        )
+        .await;
+
+        send_and_settle(
+            &handle,
+            Frame::Cancel(CancelFrame::default()),
+            Direction::Downstream,
+        )
+        .await;
+
+        timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+
+        // The Err should have been caught and an ErrorFrame pushed upstream.
+        let upstream = drain_rx(&mut up_rx).await;
+        let error_frames: Vec<_> = upstream
+            .iter()
+            .filter(|f| matches!(&f.frame, Frame::Error(_)))
+            .collect();
+        assert_eq!(
+            error_frames.len(),
+            1,
+            "expected exactly one ErrorFrame upstream, got: {:?}",
+            frame_names(&upstream)
+        );
+        match &error_frames[0].frame {
+            Frame::Error(e) => {
+                assert!(!e.fatal, "auto-caught errors should be non-fatal");
+                assert!(
+                    e.error.contains("intentional failure"),
+                    "error message should contain original error: {}",
+                    e.error
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Interruption should still flow downstream.
+        let downstream = drain_rx(&mut down_rx).await;
+        let names = frame_names(&downstream);
+        assert!(
+            names.contains(&"Interruption".to_string()),
+            "non-failing frames should still flow: {:?}",
+            names
         );
     }
 }

@@ -219,6 +219,12 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
                 button: KeypadEntry::Five,
             }),
         ),
+        (
+            "InputDTMF",
+            Frame::InputDTMF(InputDTMFFrame {
+                button: KeypadEntry::Nine,
+            }),
+        ),
         // Data
         ("OutputAudioRaw", Frame::OutputAudioRaw(audio())),
         (
@@ -254,7 +260,17 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
         ("Sprite", Frame::Sprite(SpriteFrame { images: vec![] })),
         ("Text", Frame::Text(TextFrame::new("t"))),
         ("LLMText", Frame::LLMText(TextFrame::new("t"))),
-        ("TTSText", Frame::TTSText(TextFrame::new("t"))),
+        (
+            "TTSText",
+            Frame::TTSText(AggregatedTextFrame {
+                text: "t".into(),
+                aggregated_by: "sentence".into(),
+                context_id: None,
+                skip_tts: None,
+                includes_inter_frame_spaces: false,
+                append_to_context: true,
+            }),
+        ),
         (
             "Transcription",
             Frame::Transcription(TranscriptionFrame {
@@ -354,6 +370,7 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
                 arguments: serde_json::Value::Null,
                 result: serde_json::Value::Null,
                 run_llm: None,
+                properties: None,
             }),
         ),
         (
@@ -366,6 +383,17 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
             "OutputDTMF",
             Frame::OutputDTMF(OutputDTMFFrame {
                 button: KeypadEntry::Star,
+            }),
+        ),
+        (
+            "AggregatedText",
+            Frame::AggregatedText(AggregatedTextFrame {
+                text: "Hello world.".into(),
+                aggregated_by: "sentence".into(),
+                context_id: None,
+                skip_tts: None,
+                includes_inter_frame_spaces: false,
+                append_to_context: true,
             }),
         ),
         // Control
@@ -503,6 +531,12 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
             "ServiceSwitcherRequestMetadata",
             Frame::ServiceSwitcherRequestMetadata(ServiceSwitcherRequestMetadataFrame {
                 service_name: "s".into(),
+            }),
+        ),
+        (
+            "ManuallySwitchService",
+            Frame::ManuallySwitchService(ManuallySwitchServiceFrame {
+                service_name: "tts".into(),
             }),
         ),
     ]
@@ -651,6 +685,59 @@ fn vad_params_defaults() {
     assert_eq!(vp.start_secs, 0.2);
     assert_eq!(vp.stop_secs, 0.2);
     assert_eq!(vp.min_volume, 0.6);
+}
+
+#[test]
+fn audio_raw_num_frames_mono() {
+    // 4 samples × 1 channel × 2 bytes = 8 bytes → 4 frames
+    let frame = AudioRawFrame {
+        audio: Bytes::from(vec![0u8; 8]),
+        sample_rate: 16000,
+        num_channels: 1,
+    };
+    assert_eq!(frame.num_frames(), 4);
+}
+
+#[test]
+fn audio_raw_num_frames_stereo() {
+    // 8 bytes / (2 channels × 2 bytes) = 2 frames
+    let frame = AudioRawFrame {
+        audio: Bytes::from(vec![0u8; 8]),
+        sample_rate: 16000,
+        num_channels: 2,
+    };
+    assert_eq!(frame.num_frames(), 2);
+}
+
+#[test]
+fn audio_raw_num_frames_empty() {
+    let frame = AudioRawFrame {
+        audio: Bytes::new(),
+        sample_rate: 16000,
+        num_channels: 1,
+    };
+    assert_eq!(frame.num_frames(), 0);
+}
+
+#[test]
+fn audio_raw_num_frames_zero_channels() {
+    let frame = AudioRawFrame {
+        audio: Bytes::from(vec![0u8; 8]),
+        sample_rate: 16000,
+        num_channels: 0,
+    };
+    assert_eq!(frame.num_frames(), 0);
+}
+
+#[test]
+fn tts_audio_raw_num_frames() {
+    let frame = TTSAudioRawFrame {
+        audio: Bytes::from(vec![0u8; 960]),
+        sample_rate: 24000,
+        num_channels: 1,
+        context_id: None,
+    };
+    assert_eq!(frame.num_frames(), 480);
 }
 
 #[test]

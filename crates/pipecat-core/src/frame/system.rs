@@ -99,6 +99,13 @@ pub struct UserAudioRawFrame {
     pub user_id: String,
 }
 
+impl UserAudioRawFrame {
+    /// Number of audio frames (samples per channel).
+    pub fn num_frames(&self) -> usize {
+        super::common::audio_num_frames(self.audio.len(), self.num_channels)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UserImageRawFrame {
     pub image: Bytes,
@@ -254,5 +261,11 @@ pub struct InterruptionTaskFrame {
 /// Urgent DTMF tone output (system priority, bypasses audio queue).
 #[derive(Debug, Clone)]
 pub struct OutputDTMFUrgentFrame {
+    pub button: super::data::KeypadEntry,
+}
+
+/// Input DTMF tone received from transport (system priority).
+#[derive(Debug, Clone)]
+pub struct InputDTMFFrame {
     pub button: super::data::KeypadEntry,
 }

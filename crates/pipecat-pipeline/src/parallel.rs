@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
+use pipecat_core::error::Result;
 use pipecat_core::frame::{Direction, FrameEnvelope};
 use pipecat_core::observer::PipelineObserver;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
@@ -292,7 +293,7 @@ impl FrameProcessor for ParallelPipeline {
         envelope: FrameEnvelope,
         direction: Direction,
         ctx: &ProcessorContext,
-    ) {
+    ) -> Result<()> {
         if matches!(self.state, ParallelState::Idle(_)) {
             self.initialize(ctx);
         }
@@ -309,7 +310,7 @@ impl FrameProcessor for ParallelPipeline {
                 if is_syncing && !is_lifecycle {
                     // Buffer non-lifecycle frames during sync to prevent ordering issues.
                     self.pending_external.push((envelope, direction));
-                    return;
+                    return Ok(());
                 }
 
                 // Drain any pending external frames first (sync just completed).
@@ -326,6 +327,7 @@ impl FrameProcessor for ParallelPipeline {
                 debug!("ParallelPipeline: frame in non-running state, dropping");
             }
         }
+        Ok(())
     }
 
     async fn cleanup(&mut self) {
