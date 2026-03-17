@@ -1,0 +1,17 @@
+[package]
+name = "pipecat-turns"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pipecat-core = { workspace = true }
+pipecat-audio = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
