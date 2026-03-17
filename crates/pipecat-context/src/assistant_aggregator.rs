@@ -125,6 +125,17 @@ impl FrameProcessor for LLMAssistantAggregator {
                 // Consumed — not forwarded
             }
 
+            // TTSText is pushed by TTS after synthesis. It carries the aggregated
+            // text that was actually spoken, matching Python's TTSTextFrame handling.
+            Frame::TTSText(t) => {
+                if t.append_to_context && !t.text.is_empty() {
+                    trace!("AssistantAggregator: accumulating TTSText: {:?}", t.text);
+                    self.agg
+                        .add_text_part(t.text.clone(), t.includes_inter_frame_spaces);
+                }
+                // Consumed — not forwarded
+            }
+
             // --- Function call lifecycle (consumed) ---
             Frame::FunctionCallsStarted(f) => {
                 self.function_calls.clear();

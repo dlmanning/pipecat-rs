@@ -179,6 +179,16 @@ pub struct ManuallySwitchServiceFrame {
 }
 
 // ---------------------------------------------------------------------------
+// Wakeup (internal self-notification)
+// ---------------------------------------------------------------------------
+
+/// Internal self-notification frame. Sent by background tasks (e.g. timeout
+/// strategies) via the processor's own node handle to wake up the run loop.
+/// Consumed by the owning processor — never forwarded downstream.
+#[derive(Debug, Clone)]
+pub struct WakeupFrame;
+
+// ---------------------------------------------------------------------------
 // Vision (aliases for LLM response frames)
 // ---------------------------------------------------------------------------
 

@@ -344,6 +344,11 @@ pub trait FrameProcessor: Send + Sync {
     /// because `process_frame` consumed the envelope — processors that need
     /// the frame in after-hooks should store it in `on_before_process`.
     async fn on_after_process(&mut self) {}
+
+    /// Called by ProcessorNode to provide a handle for self-notification.
+    /// Background tasks can send frames through this handle to wake up
+    /// the processor's run loop. Default is a no-op.
+    fn set_node_handle(&mut self, _handle: crate::node::ProcessorNodeHandle) {}
 }
 
 // ---------------------------------------------------------------------------

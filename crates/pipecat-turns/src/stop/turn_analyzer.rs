@@ -3,8 +3,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pipecat_audio::turn::{EndOfTurnState, TurnAnalyzer};
 use pipecat_core::frame::{
-    Direction, Frame, FrameEnvelope, MetricsFrame, SpeechControlParamsFrame,
+    self, Direction, Frame, FrameEnvelope, MetricsFrame, SpeechControlParamsFrame,
 };
+use pipecat_core::node::ProcessorNodeHandle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::trace;
@@ -41,6 +42,7 @@ pub struct TurnAnalyzerUserTurnStopStrategy {
     signal_tx: mpsc::UnboundedSender<TimeoutSignal>,
     signal_rx: mpsc::UnboundedReceiver<TimeoutSignal>,
     timeout_handle: Option<JoinHandle<()>>,
+    node_handle: Option<ProcessorNodeHandle>,
 }
 
 impl TurnAnalyzerUserTurnStopStrategy {
@@ -59,6 +61,7 @@ impl TurnAnalyzerUserTurnStopStrategy {
             signal_tx,
             signal_rx,
             timeout_handle: None,
+            node_handle: None,
         }
     }
 
@@ -74,9 +77,16 @@ impl TurnAnalyzerUserTurnStopStrategy {
     fn start_timeout(&mut self, timeout_secs: f64) {
         self.cancel_timeout();
         let tx = self.signal_tx.clone();
+        let node_handle = self.node_handle.clone();
         self.timeout_handle = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs_f64(timeout_secs)).await;
             let _ = tx.send(TimeoutSignal::Elapsed);
+            if let Some(handle) = node_handle {
+                handle.try_send_normal(
+                    frame::FrameEnvelope::new(frame::Frame::Wakeup(frame::WakeupFrame)),
+                    frame::Direction::Downstream,
+                );
+            }
         }));
     }
 
@@ -216,6 +226,10 @@ impl StopStrategy for TurnAnalyzerUserTurnStopStrategy {
 
     fn enable_user_speaking_frames(&self) -> bool {
         self.enable_user_speaking_frames
+    }
+
+    fn set_node_handle(&mut self, handle: ProcessorNodeHandle) {
+        self.node_handle = Some(handle);
     }
 }
 

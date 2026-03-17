@@ -7,6 +7,7 @@ members = [
     "crates/pipecat-turns",
     "crates/pipecat-context",
     "crates/pipecat-services",
+    "crates/pipecat-integration-tests",
 ]
 resolver = "2"
 
@@ -48,7 +49,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 base64 = "0.22"
 
 # Image processing
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Utilities
 thiserror = "2"

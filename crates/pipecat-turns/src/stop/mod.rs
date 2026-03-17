@@ -10,6 +10,7 @@ use std::fmt::Debug;
 
 use async_trait::async_trait;
 use pipecat_core::frame::Frame;
+use pipecat_core::node::ProcessorNodeHandle;
 
 use crate::action::TurnAction;
 
@@ -18,6 +19,9 @@ use crate::action::TurnAction;
 /// Stop strategies may spawn background timeout tasks. These produce actions
 /// asynchronously via an internal channel. The controller calls
 /// `drain_pending_actions()` on each `process_frame` cycle to collect them.
+///
+/// Strategies that spawn background timeout tasks should implement
+/// `set_node_handle` to receive a handle for sending wake-up frames.
 #[async_trait]
 pub trait StopStrategy: Send + Sync + Debug {
     /// Process an incoming frame. Returns immediate actions.
@@ -39,4 +43,8 @@ pub trait StopStrategy: Send + Sync + Debug {
 
     /// Whether this strategy enables user speaking frames when it triggers.
     fn enable_user_speaking_frames(&self) -> bool;
+
+    /// Provide a node handle for self-notification. Background timeout tasks
+    /// use this to send a Wakeup frame that triggers drain_pending_actions.
+    fn set_node_handle(&mut self, _handle: ProcessorNodeHandle) {}
 }

@@ -79,6 +79,16 @@ impl ProcessorNodeHandle {
             .await
             .map_err(|e| PipecatError::ChannelSend(format!("NodeHandle({}): {}", self.name, e)))
     }
+
+    /// Non-blocking send on the normal channel. Useful for background tasks that
+    /// need to wake up the processor's run loop without awaiting.
+    /// Silently drops the frame if the channel is full or closed.
+    pub fn try_send_normal(&self, envelope: FrameEnvelope, direction: Direction) {
+        let _ = self.normal_tx.try_send(NodeMessage {
+            envelope,
+            direction,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +137,7 @@ pub struct ProcessorNode {
     ctx: ProcessorContext,
     observer: Option<Arc<dyn PipelineObserver>>,
     pending: VecDeque<NodeMessage>,
+    self_handle: Option<ProcessorNodeHandle>,
     started: bool,
     cancelled: bool,
     paused: bool,
@@ -220,6 +231,7 @@ impl ProcessorNode {
             ctx,
             observer,
             pending: VecDeque::new(),
+            self_handle: Some(handle.clone()),
             started: false,
             cancelled: false,
             paused: false,
@@ -238,6 +250,12 @@ impl ProcessorNode {
             "ProcessorNode starting"
         );
 
+        // Give the processor a handle to this node for self-notification,
+        // then drop our copy so channel closure detection still works when
+        // the external handle is dropped.
+        if let Some(handle) = self.self_handle.take() {
+            self.processor.set_node_handle(handle);
+        }
         self.processor.setup().await;
 
         loop {

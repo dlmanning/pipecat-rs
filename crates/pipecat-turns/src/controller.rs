@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use pipecat_core::frame::Frame;
+use pipecat_core::frame::{self, Frame};
+use pipecat_core::node::ProcessorNodeHandle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace};
@@ -33,6 +34,7 @@ pub struct UserTurnController {
     timeout_reset_tx: mpsc::UnboundedSender<()>,
     timeout_action_rx: mpsc::UnboundedReceiver<GlobalTimeoutSignal>,
     timeout_task: Option<JoinHandle<()>>,
+    node_handle: Option<ProcessorNodeHandle>,
 }
 
 #[derive(Debug)]
@@ -53,6 +55,16 @@ impl UserTurnController {
             timeout_reset_tx,
             timeout_action_rx,
             timeout_task: None,
+            node_handle: None,
+        }
+    }
+
+    /// Set the node handle for self-notification. Background timeout tasks
+    /// will send Wakeup frames through this handle to trigger processing.
+    pub fn set_node_handle(&mut self, handle: ProcessorNodeHandle) {
+        self.node_handle = Some(handle.clone());
+        for strategy in &mut self.strategies.stop {
+            strategy.set_node_handle(handle.clone());
         }
     }
 
@@ -65,8 +77,9 @@ impl UserTurnController {
         self.timeout_action_rx = timeout_action_rx;
 
         let timeout = self.user_turn_stop_timeout;
+        let node_handle = self.node_handle.clone();
         self.timeout_task = Some(tokio::spawn(async move {
-            global_timeout_loop(reset_rx, action_tx, timeout).await;
+            global_timeout_loop(reset_rx, action_tx, timeout, node_handle).await;
         }));
 
         for strategy in &mut self.strategies.start {
@@ -110,6 +123,9 @@ impl UserTurnController {
             strategy.setup().await;
         }
         for strategy in &mut strategies.stop {
+            if let Some(ref handle) = self.node_handle {
+                strategy.set_node_handle(handle.clone());
+            }
             strategy.setup().await;
         }
 
@@ -268,6 +284,7 @@ async fn global_timeout_loop(
     mut reset_rx: mpsc::UnboundedReceiver<()>,
     action_tx: mpsc::UnboundedSender<GlobalTimeoutSignal>,
     timeout: Duration,
+    node_handle: Option<ProcessorNodeHandle>,
 ) {
     loop {
         match tokio::time::timeout(timeout, reset_rx.recv()).await {
@@ -283,6 +300,13 @@ async fn global_timeout_loop(
                 // Timeout elapsed with no activity
                 if action_tx.send(GlobalTimeoutSignal::Elapsed).is_err() {
                     break;
+                }
+                // Wake up the processor node so drain_pending_actions runs
+                if let Some(ref handle) = node_handle {
+                    handle.try_send_normal(
+                        frame::FrameEnvelope::new(frame::Frame::Wakeup(frame::WakeupFrame)),
+                        frame::Direction::Downstream,
+                    );
                 }
             }
         }

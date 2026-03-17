@@ -169,6 +169,10 @@ impl FrameProcessor for LLMUserAggregator {
         self.base.id()
     }
 
+    fn set_node_handle(&mut self, handle: pipecat_core::node::ProcessorNodeHandle) {
+        self.turn_controller.set_node_handle(handle);
+    }
+
     async fn setup(&mut self) {
         self.turn_controller.setup().await;
     }
@@ -238,6 +242,9 @@ impl FrameProcessor for LLMUserAggregator {
                 self.emit_turn_stopped_if_needed(ctx).await?;
                 ctx.push_frame(envelope, direction).await?;
             }
+
+            // --- Wakeup: consumed (triggers turn controller drain below) ---
+            Frame::Wakeup(_) => {}
 
             // --- Everything else: forward ---
             _ => {

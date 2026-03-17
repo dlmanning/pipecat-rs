@@ -150,6 +150,8 @@ pub enum Frame {
 
     ServiceSwitcherRequestMetadata(ServiceSwitcherRequestMetadataFrame),
     ManuallySwitchService(ManuallySwitchServiceFrame),
+
+    Wakeup(WakeupFrame), // uninterruptible
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +261,7 @@ impl fmt::Display for Frame {
             Frame::MixerEnable(_) => "MixerEnable",
             Frame::ServiceSwitcherRequestMetadata(_) => "ServiceSwitcherRequestMetadata",
             Frame::ManuallySwitchService(_) => "ManuallySwitchService",
+            Frame::Wakeup(_) => "Wakeup",
         };
         f.write_str(name)
     }
@@ -382,6 +385,7 @@ impl Frame {
                 | Frame::MixerEnable(_)
                 | Frame::ServiceSwitcherRequestMetadata(_)
                 | Frame::ManuallySwitchService(_)
+                | Frame::Wakeup(_)
         )
     }
 
@@ -402,6 +406,7 @@ impl Frame {
                 | Frame::TTSUpdateSettings(_)
                 | Frame::STTUpdateSettings(_)
                 | Frame::LLMContextSummaryResult(_)
+                | Frame::Wakeup(_)
         )
     }
 
@@ -514,6 +519,7 @@ impl Frame {
             Frame::MixerEnable(_) => {}
             Frame::ServiceSwitcherRequestMetadata(_) => {}
             Frame::ManuallySwitchService(_) => {}
+            Frame::Wakeup(_) => {}
         }
     }
 }

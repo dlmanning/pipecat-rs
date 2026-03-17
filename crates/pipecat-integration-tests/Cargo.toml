@@ -1,0 +1,18 @@
+[package]
+name = "pipecat-integration-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pipecat-core = { workspace = true, features = ["test-utils"] }
+pipecat-pipeline = { workspace = true }
+pipecat-services = { workspace = true }
+pipecat-context = { workspace = true }
+pipecat-turns = { workspace = true }
+pipecat-transport = { workspace = true }
+pipecat-audio = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
