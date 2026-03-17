@@ -33,3 +33,18 @@ pub fn make_llm_context_frame(messages: Vec<serde_json::Value>) -> FrameEnvelope
         context: serde_json::json!({ "messages": messages }),
     }))
 }
+
+/// Create an LLMContextFrame with messages, tools, and tool_choice.
+pub fn make_llm_context_frame_with_tools(
+    messages: Vec<serde_json::Value>,
+    tools: serde_json::Value,
+    tool_choice: serde_json::Value,
+) -> FrameEnvelope {
+    FrameEnvelope::new(Frame::LLMContext(LLMContextFrame {
+        context: serde_json::json!({
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }),
+    }))
+}
