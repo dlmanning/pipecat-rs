@@ -3,17 +3,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-/// Trait for audio resamplers that convert between sample rates.
-///
-/// Concrete implementations handle the actual resampling. The transport
-/// uses this trait to convert audio to the output sample rate.
-#[async_trait]
-pub trait AudioResampler: Send + Sync {
-    /// Resample audio data from one sample rate to another.
-    ///
-    /// The audio is 16-bit LE PCM mono. Returns the resampled audio data.
-    async fn resample(&mut self, audio: Bytes, in_rate: u32, out_rate: u32) -> Bytes;
-}
+use super::AudioResampler;
 
 /// Duration after which the stream resampler clears its internal state,
 /// matching Python's `CLEAR_STREAM_AFTER_SECS = 0.2`.
@@ -27,7 +17,8 @@ const CLEAR_STREAM_AFTER_SECS: f64 = 0.2;
 ///
 /// **Limitations:** No anti-aliasing filter — downsampling may introduce
 /// aliasing artifacts on wideband content. For production-quality resampling,
-/// implement [`AudioResampler`] with a library like `rubato` or `libsoxr`.
+/// use [`SincResampler`](super::SincResampler) (requires `sinc-resampler` feature)
+/// or implement [`AudioResampler`] with a library like `libsoxr`.
 ///
 /// Matches the streaming behavior of Python's `SOXRStreamAudioResampler`:
 /// - Maintains state across calls for smooth chunk boundaries

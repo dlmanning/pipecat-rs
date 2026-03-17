@@ -127,6 +127,7 @@ impl ProcessorContext {
                     source_id: self.processor_id,
                     destination_name: dest_name,
                     frame: &envelope.frame,
+                    frame_id: envelope.header.id,
                     direction,
                     timestamp: Instant::now(),
                 })
@@ -230,6 +231,20 @@ impl ProcessorContext {
         let data = metrics.record_llm_usage(usage);
         self.send_downstream(Frame::Metrics(MetricsFrame { data: vec![data] }))
             .await
+    }
+
+    /// Stop a text aggregation measurement and push the resulting MetricsFrame downstream.
+    /// Callers should gate on their own metrics-enabled flag; this always pushes
+    /// if the timer was started.
+    pub async fn push_text_aggregation_metrics(
+        &self,
+        metrics: &mut ProcessorMetrics,
+    ) -> Result<()> {
+        if let Some(data) = metrics.stop_text_aggregation() {
+            self.send_downstream(Frame::Metrics(MetricsFrame { data: vec![data] }))
+                .await?;
+        }
+        Ok(())
     }
 
     /// Push TTS usage metrics downstream. Always sends; callers should gate

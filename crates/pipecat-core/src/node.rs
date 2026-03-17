@@ -397,6 +397,7 @@ impl ProcessorNode {
                     processor_name: self.processor.name(),
                     processor_id: self.processor.id(),
                     frame: &msg.envelope.frame,
+                    frame_id: msg.envelope.header.id,
                     direction: msg.direction,
                     timestamp: Instant::now(),
                 })
@@ -1558,8 +1559,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_frame_err_produces_error_frame_upstream() {
-        let (node, handle, mut down_rx, mut up_rx) =
-            make_node(Box::new(FailingProcessor::new()));
+        let (node, handle, mut down_rx, mut up_rx) = make_node(Box::new(FailingProcessor::new()));
 
         let run = tokio::spawn(async move { node.run().await });
 

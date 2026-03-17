@@ -5,6 +5,8 @@ members = [
     "crates/pipecat-transport",
     "crates/pipecat-audio",
     "crates/pipecat-turns",
+    "crates/pipecat-context",
+    "crates/pipecat-services",
 ]
 resolver = "2"
 
@@ -21,6 +23,8 @@ pipecat-pipeline = { path = "crates/pipecat-pipeline" }
 pipecat-transport = { path = "crates/pipecat-transport" }
 pipecat-audio = { path = "crates/pipecat-audio" }
 pipecat-turns = { path = "crates/pipecat-turns" }
+pipecat-context = { path = "crates/pipecat-context" }
+pipecat-services = { path = "crates/pipecat-services" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -36,5 +40,16 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# Networking
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Encoding
+base64 = "0.22"
+
+# Image processing
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 # Utilities
 thiserror = "2"
+url = "2"

@@ -14,6 +14,7 @@ pub struct FrameProcessedEvent<'a> {
     pub processor_name: &'a str,
     pub processor_id: u64,
     pub frame: &'a Frame,
+    pub frame_id: u64,
     pub direction: Direction,
     pub timestamp: Instant,
 }
@@ -25,6 +26,7 @@ pub struct FramePushedEvent<'a> {
     pub source_id: u64,
     pub destination_name: Option<&'a str>,
     pub frame: &'a Frame,
+    pub frame_id: u64,
     pub direction: Direction,
     pub timestamp: Instant,
 }
@@ -146,6 +148,7 @@ mod tests {
             processor_name: "test",
             processor_id: 1,
             frame: &Frame::Interruption(InterruptionFrame),
+            frame_id: 0,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })
@@ -156,6 +159,7 @@ mod tests {
             source_id: 1,
             destination_name: None,
             frame: &Frame::Interruption(InterruptionFrame),
+            frame_id: 0,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })
@@ -172,6 +176,7 @@ mod tests {
             processor_name: "proc1",
             processor_id: 1,
             frame: &Frame::Text(TextFrame::new("hello")),
+            frame_id: 1,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })
@@ -181,6 +186,7 @@ mod tests {
             processor_name: "proc1",
             processor_id: 1,
             frame: &Frame::Interruption(InterruptionFrame),
+            frame_id: 2,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })
@@ -201,6 +207,7 @@ mod tests {
             source_id: 1,
             destination_name: None,
             frame: &Frame::Text(TextFrame::new("hello")),
+            frame_id: 3,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })
@@ -257,6 +264,7 @@ mod tests {
             source_id: 5,
             destination_name: None,
             frame: &metrics_frame,
+            frame_id: 4,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })
@@ -276,6 +284,7 @@ mod tests {
             source_id: 1,
             destination_name: None,
             frame: &Frame::Text(TextFrame::new("up")),
+            frame_id: 5,
             direction: Direction::Upstream,
             timestamp: Instant::now(),
         })
@@ -293,6 +302,7 @@ mod tests {
             processor_name: "test",
             processor_id: 1,
             frame: &Frame::Start(StartFrame::default()),
+            frame_id: 6,
             direction: Direction::Downstream,
             timestamp: Instant::now(),
         })

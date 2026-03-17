@@ -333,11 +333,9 @@ impl FrameProcessor for FailingProcessor {
         ctx: &ProcessorContext,
     ) -> Result<()> {
         match &envelope.frame {
-            Frame::Text(_) => {
-                Err(crate::error::PipecatError::ProcessorError(
-                    "intentional failure".into(),
-                ))
-            }
+            Frame::Text(_) => Err(crate::error::PipecatError::ProcessorError(
+                "intentional failure".into(),
+            )),
             _ => ctx.push_frame(envelope, direction).await,
         }
     }
