@@ -73,6 +73,9 @@ pub enum Frame {
     StopTask(StopTaskFrame),
     InterruptionTask(InterruptionTaskFrame),
 
+    // System-priority DTMF
+    OutputDTMFUrgent(OutputDTMFUrgentFrame),
+
     // ==== Data frames (normal priority, interruptible) ====
     OutputAudioRaw(AudioRawFrame),
     TTSAudioRaw(TTSAudioRawFrame),
@@ -105,6 +108,8 @@ pub enum Frame {
     FunctionCallResult(FunctionCallResultFrame),
 
     OutputTransportMessage(OutputTransportMessageFrame),
+
+    OutputDTMF(OutputDTMFFrame),
 
     // ==== Control frames (normal priority) ====
     End(EndFrame),                                         // uninterruptible
@@ -190,6 +195,7 @@ impl fmt::Display for Frame {
             Frame::CancelTask(_) => "CancelTask",
             Frame::StopTask(_) => "StopTask",
             Frame::InterruptionTask(_) => "InterruptionTask",
+            Frame::OutputDTMFUrgent(_) => "OutputDTMFUrgent",
             Frame::OutputAudioRaw(_) => "OutputAudioRaw",
             Frame::TTSAudioRaw(_) => "TTSAudioRaw",
             Frame::SpeechOutputAudioRaw(_) => "SpeechOutputAudioRaw",
@@ -216,6 +222,7 @@ impl fmt::Display for Frame {
             Frame::LLMContext(_) => "LLMContext",
             Frame::FunctionCallResult(_) => "FunctionCallResult",
             Frame::OutputTransportMessage(_) => "OutputTransportMessage",
+            Frame::OutputDTMF(_) => "OutputDTMF",
             Frame::End(_) => "End",
             Frame::Stop(_) => "Stop",
             Frame::FunctionCallInProgress(_) => "FunctionCallInProgress",
@@ -296,6 +303,7 @@ impl Frame {
                 | Frame::CancelTask(_)
                 | Frame::StopTask(_)
                 | Frame::InterruptionTask(_)
+                | Frame::OutputDTMFUrgent(_)
         )
     }
 
@@ -328,6 +336,7 @@ impl Frame {
                 | Frame::LLMContext(_)
                 | Frame::FunctionCallResult(_)
                 | Frame::OutputTransportMessage(_)
+                | Frame::OutputDTMF(_)
         )
     }
 
@@ -433,6 +442,7 @@ impl Frame {
             Frame::CancelTask(_) => {}
             Frame::StopTask(_) => {}
             Frame::InterruptionTask(_) => {}
+            Frame::OutputDTMFUrgent(_) => {}
             // Data
             Frame::OutputAudioRaw(_) => {}
             Frame::TTSAudioRaw(_) => {}
@@ -460,6 +470,7 @@ impl Frame {
             Frame::LLMContext(_) => {}
             Frame::FunctionCallResult(_) => {}
             Frame::OutputTransportMessage(_) => {}
+            Frame::OutputDTMF(_) => {}
             // Control
             Frame::End(_) => {}
             Frame::Stop(_) => {}

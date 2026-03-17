@@ -248,7 +248,12 @@ mod tests {
     #[test]
     fn test_interleave_stereo_different_length() {
         // Left has 3 samples, right has 2 — truncate to 2
-        let left = [100i16.to_le_bytes(), 200i16.to_le_bytes(), 300i16.to_le_bytes()].concat();
+        let left = [
+            100i16.to_le_bytes(),
+            200i16.to_le_bytes(),
+            300i16.to_le_bytes(),
+        ]
+        .concat();
         let right = [400i16.to_le_bytes(), 500i16.to_le_bytes()].concat();
         let stereo = interleave_stereo_audio(&left, &right);
         assert_eq!(stereo.len(), 8); // 2 samples × 2 channels × 2 bytes

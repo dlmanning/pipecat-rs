@@ -99,7 +99,7 @@ impl Default for VadParams {
         Self {
             confidence: 0.7,
             start_secs: 0.2,
-            stop_secs: 0.8,
+            stop_secs: 0.2,
             min_volume: 0.6,
         }
     }

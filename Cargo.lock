@@ -209,6 +209,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "pipecat-core",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -250,6 +251,7 @@ dependencies = [
  "futures",
  "pipecat-audio",
  "pipecat-core",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -260,9 +262,11 @@ name = "pipecat-turns"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures",
  "pipecat-audio",
  "pipecat-core",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

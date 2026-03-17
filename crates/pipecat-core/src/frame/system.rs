@@ -246,3 +246,13 @@ pub struct InterruptionTaskFrame {
     pub task_id: String,
     pub handler_id: String,
 }
+
+// ---------------------------------------------------------------------------
+// DTMF (system priority — bypass queue)
+// ---------------------------------------------------------------------------
+
+/// Urgent DTMF tone output (system priority, bypasses audio queue).
+#[derive(Debug, Clone)]
+pub struct OutputDTMFUrgentFrame {
+    pub button: super::data::KeypadEntry,
+}

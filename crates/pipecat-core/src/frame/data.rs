@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use bytes::Bytes;
 
 use super::common::ImageRawFrame;
@@ -180,4 +182,51 @@ pub struct FunctionCallResultFrame {
 #[derive(Debug, Clone)]
 pub struct OutputTransportMessageFrame {
     pub message: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// DTMF
+// ---------------------------------------------------------------------------
+
+/// Keypad button for DTMF tone generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeypadEntry {
+    Zero,
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+    Eight,
+    Nine,
+    Pound,
+    Star,
+}
+
+impl std::fmt::Display for KeypadEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let c = match self {
+            Self::Zero => '0',
+            Self::One => '1',
+            Self::Two => '2',
+            Self::Three => '3',
+            Self::Four => '4',
+            Self::Five => '5',
+            Self::Six => '6',
+            Self::Seven => '7',
+            Self::Eight => '8',
+            Self::Nine => '9',
+            Self::Pound => '#',
+            Self::Star => '*',
+        };
+        f.write_char(c)
+    }
+}
+
+/// DTMF tone output (queued through audio pipeline for ordering).
+#[derive(Debug, Clone)]
+pub struct OutputDTMFFrame {
+    pub button: KeypadEntry,
 }

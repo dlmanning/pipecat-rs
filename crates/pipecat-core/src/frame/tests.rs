@@ -213,6 +213,12 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
                 handler_id: "h".into(),
             }),
         ),
+        (
+            "OutputDTMFUrgent",
+            Frame::OutputDTMFUrgent(OutputDTMFUrgentFrame {
+                button: KeypadEntry::Five,
+            }),
+        ),
         // Data
         ("OutputAudioRaw", Frame::OutputAudioRaw(audio())),
         (
@@ -354,6 +360,12 @@ fn all_frames() -> Vec<(&'static str, Frame)> {
             "OutputTransportMessage",
             Frame::OutputTransportMessage(OutputTransportMessageFrame {
                 message: serde_json::Value::Null,
+            }),
+        ),
+        (
+            "OutputDTMF",
+            Frame::OutputDTMF(OutputDTMFFrame {
+                button: KeypadEntry::Star,
             }),
         ),
         // Control
@@ -637,7 +649,7 @@ fn vad_params_defaults() {
     let vp = VadParams::default();
     assert_eq!(vp.confidence, 0.7);
     assert_eq!(vp.start_secs, 0.2);
-    assert_eq!(vp.stop_secs, 0.8);
+    assert_eq!(vp.stop_secs, 0.2);
     assert_eq!(vp.min_volume, 0.6);
 }
 
