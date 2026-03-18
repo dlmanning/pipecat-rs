@@ -13,7 +13,7 @@ use crate::utils::{calculate_audio_volume, exp_smoothing};
 /// consecutive frames have been observed in that direction. This makes
 /// invalid states unrepresentable — there is no counter when in `Quiet`
 /// or `Speaking`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VadState {
     Quiet,
     Starting { consecutive_frames: u32 },
@@ -291,7 +291,7 @@ impl<A: VadAnalyzer> VadAnalyzerBase<A> {
         self.state_machine.update(speaking);
         let event = self.state_machine.finalize();
 
-        (self.state_machine.state().clone(), event)
+        (*self.state_machine.state(), event)
     }
 
     /// Analyze an audio buffer. Accumulates audio, processes in chunks,
@@ -304,15 +304,14 @@ impl<A: VadAnalyzer> VadAnalyzerBase<A> {
         self.buffer.extend_from_slice(audio);
 
         if self.vad_frames_num_bytes == 0 || self.buffer.len() < self.vad_frames_num_bytes {
-            return (self.state_machine.state().clone(), None);
+            return (*self.state_machine.state(), None);
         }
 
         // Process all complete chunks (Python while loop, lines 198-228)
         while self.buffer.len() >= self.vad_frames_num_bytes {
-            let chunk: Vec<u8> = self.buffer.drain(..self.vad_frames_num_bytes).collect();
-
-            let confidence = self.analyzer.voice_confidence(&chunk);
-            let volume = self.get_smoothed_volume(&chunk);
+            let confidence = self.analyzer.voice_confidence(&self.buffer[..self.vad_frames_num_bytes]);
+            let volume = self.get_smoothed_volume(&self.buffer[..self.vad_frames_num_bytes]);
+            self.buffer.drain(..self.vad_frames_num_bytes);
             self.prev_volume = volume;
 
             let speaking = confidence >= self.params.confidence && volume >= self.params.min_volume;
@@ -323,7 +322,7 @@ impl<A: VadAnalyzer> VadAnalyzerBase<A> {
         // Post-loop threshold check (Python lines 230-243)
         let event = self.state_machine.finalize();
 
-        (self.state_machine.state().clone(), event)
+        (*self.state_machine.state(), event)
     }
 
     /// Recalculate internal values from current params and sample rate.

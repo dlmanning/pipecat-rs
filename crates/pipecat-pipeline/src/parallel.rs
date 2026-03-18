@@ -273,16 +273,23 @@ impl ParallelPipeline {
         };
     }
 
-    /// Send a frame to all branches.
+    /// Send a frame to all branches. Clones for all but the last branch.
     async fn send_to_branches(
         handles: &[pipecat_core::node::ProcessorNodeHandle],
         envelope: FrameEnvelope,
         direction: Direction,
     ) {
-        for (i, handle) in handles.iter().enumerate() {
+        if handles.is_empty() {
+            return;
+        }
+        let last = handles.len() - 1;
+        for (i, handle) in handles[..last].iter().enumerate() {
             if let Err(e) = handle.send(envelope.clone(), direction).await {
                 debug!("ParallelPipeline: branch[{i}] send failed: {e}");
             }
+        }
+        if let Err(e) = handles[last].send(envelope, direction).await {
+            debug!("ParallelPipeline: branch[{last}] send failed: {e}");
         }
     }
 }

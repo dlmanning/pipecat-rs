@@ -137,8 +137,8 @@ impl<A: VadAnalyzer> VadController<A> {
         let mut events = Vec::new();
 
         while self.buffer.len() >= chunk_size {
-            let chunk: Vec<u8> = self.buffer.drain(..chunk_size).collect();
-            let (_state, event) = self.analyzer.process_chunk(&chunk);
+            let (_state, event) = self.analyzer.process_chunk(&self.buffer[..chunk_size]);
+            self.buffer.drain(..chunk_size);
 
             if let Some(vad_event) = event {
                 match vad_event {

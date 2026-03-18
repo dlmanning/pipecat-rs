@@ -148,7 +148,7 @@ impl LocalAudioInputTransport {
                 },
 
                 (AudioInputSource::Buffer(data), AudioFormat::Encoded) => {
-                    let cursor = std::io::Cursor::new(data.to_vec());
+                    let cursor = std::io::Cursor::new(data);
                     decode_and_feed(Box::new(cursor), &tx, realtime).await;
                 }
                 (AudioInputSource::File(path), AudioFormat::Encoded) => {

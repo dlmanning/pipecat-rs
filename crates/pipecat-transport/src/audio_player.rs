@@ -290,15 +290,16 @@ impl AudioPlayer {
         }
     }
 
-    fn drain_and_finalize(&mut self) {
+    async fn drain_and_finalize(&mut self) {
         if let PlaybackState::Active(ref playback) = self.state {
-            let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            let drain_deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
             loop {
                 let empty = playback.buffer.lock().unwrap().is_empty();
-                if empty || std::time::Instant::now() >= drain_deadline {
+                if empty || tokio::time::Instant::now() >= drain_deadline {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         }
         self.state = PlaybackState::Finalized;
@@ -326,7 +327,7 @@ impl FrameProcessor for AudioPlayer {
                 self.push_audio(audio);
             }
             Frame::End(_) | Frame::Cancel(_) => {
-                self.drain_and_finalize();
+                self.drain_and_finalize().await;
             }
             _ => {}
         }

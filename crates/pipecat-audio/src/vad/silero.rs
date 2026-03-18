@@ -67,6 +67,7 @@ pub struct SileroVadAnalyzer {
 
     // Pre-allocated buffers reused across inference calls.
     input_buffer: Vec<f32>,
+    conversion_buffer: Vec<f32>,
     sr_array: Array1<i64>,
 }
 
@@ -121,14 +122,15 @@ impl SileroVadAnalyzer {
             context: vec![0.0f32; context_size],
             last_reset_time: Instant::now(),
             input_buffer: Vec::with_capacity(context_size + num_samples),
+            conversion_buffer: Vec::with_capacity(num_samples),
             sr_array: Array1::from_vec(vec![sample_rate as i64]),
         })
     }
 
     /// Reset internal LSTM state and context buffer to zeros.
     fn reset_states(&mut self) {
-        self.state = Array3::<f32>::zeros((2, 1, 128));
-        self.context = vec![0.0f32; self.context_size];
+        self.state.fill(0.0);
+        self.context.fill(0.0);
     }
 
     /// Run inference on a single audio chunk.
@@ -180,13 +182,20 @@ impl VadAnalyzer for SileroVadAnalyzer {
     }
 
     fn voice_confidence(&mut self, buffer: &[u8]) -> f64 {
-        // Convert int16 LE PCM bytes → float32 normalized to [-1.0, 1.0]
-        let audio_f32: Vec<f32> = buffer
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
-            .collect();
+        // Convert int16 LE PCM bytes → float32 normalized to [-1.0, 1.0].
+        // We swap out the buffer to avoid a simultaneous &self and &mut self borrow.
+        let mut conv = std::mem::take(&mut self.conversion_buffer);
+        conv.clear();
+        conv.extend(
+            buffer
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0),
+        );
 
-        match self.forward(&audio_f32) {
+        let result = self.forward(&conv);
+        self.conversion_buffer = conv;
+
+        match result {
             Ok(confidence) => {
                 // Periodic state reset to prevent drift.
                 // Happens AFTER inference, matching Python (silero.py lines 216-220).

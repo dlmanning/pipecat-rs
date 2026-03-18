@@ -704,16 +704,17 @@ async fn audio_output_task(
                         * (channels as usize)
                         * 2
                         * (end_silence_secs as usize);
-                    let mut remaining = silence_bytes;
-                    while remaining > 0 {
-                        let chunk_len = remaining.min(audio_chunk_size);
+                    let silence_buf = Bytes::from(vec![0u8; silence_bytes]);
+                    let mut offset = 0;
+                    while offset < silence_bytes {
+                        let chunk_len = (silence_bytes - offset).min(audio_chunk_size);
                         let silence = AudioRawFrame {
-                            audio: Bytes::from(vec![0u8; chunk_len]),
+                            audio: silence_buf.slice(offset..offset + chunk_len),
                             sample_rate,
                             num_channels: channels,
                         };
                         callbacks.write_audio_frame(&silence).await;
-                        remaining -= chunk_len;
+                        offset += chunk_len;
                     }
                 }
                 bot_stopped_speaking(&mut state, &bot_speaking_flag, &ctx, &destination).await;

@@ -26,7 +26,7 @@ pub struct FrameHeader {
     /// Links two envelopes that were created by a single `broadcast()` call.
     /// Each sibling's `broadcast_sibling_id` is set to the other's `id`.
     pub broadcast_sibling_id: Option<u64>,
-    pub metadata: HashMap<String, serde_json::Value>,
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
     pub transport_source: Option<String>,
     pub transport_destination: Option<String>,
 }
@@ -43,7 +43,7 @@ impl FrameHeader {
             id: NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed),
             pts: None,
             broadcast_sibling_id: None,
-            metadata: HashMap::new(),
+            metadata: None,
             transport_source: None,
             transport_destination: None,
         }

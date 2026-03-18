@@ -225,13 +225,15 @@ impl Pipeline {
             up_rxs.push(urx);
         }
 
-        // Create all ProcessorNodes. We drain txs from the front so indices stay aligned.
+        // Create all ProcessorNodes.
         let mut handles = Vec::with_capacity(n);
         let mut nodes = Vec::with_capacity(n);
 
+        let mut down_tx_iter = down_txs.into_iter();
+        let mut up_tx_iter = up_txs.into_iter();
         for (i, processor) in all_processors.into_iter().enumerate() {
-            let dtx = down_txs.remove(0);
-            let utx = up_txs.remove(0);
+            let dtx = down_tx_iter.next().unwrap();
+            let utx = up_tx_iter.next().unwrap();
             let (node, handle) = if let Some(ref obs) = self.observer {
                 ProcessorNode::with_observer(processor, dtx, utx, CHANNEL_SIZE, Arc::clone(obs))
             } else {
@@ -243,19 +245,21 @@ impl Pipeline {
         }
 
         // Wire downstream bridges: down_rx[i] → handle[i+1]
+        let mut down_rx_iter = down_rxs.into_iter();
         for i in 0..n - 1 {
-            let rx = down_rxs.remove(0);
+            let rx = down_rx_iter.next().unwrap();
             let next_handle = handles[i + 1].clone();
             tasks.push(tokio::spawn(bridge(rx, next_handle, Direction::Downstream)));
         }
         // Sink's downstream output goes through its escape_tx, not down_rx.
-        drop(down_rxs);
+        drop(down_rx_iter);
 
         // Wire upstream bridges: up_rx[i] → handle[i-1] for i in 1..n
         // Source's upstream output goes through its escape_tx, not up_rx[0].
-        let _source_up_rx = up_rxs.remove(0); // drop
+        let mut up_rx_iter = up_rxs.into_iter();
+        let _source_up_rx = up_rx_iter.next(); // drop
         for i in 1..n {
-            let rx = up_rxs.remove(0);
+            let rx = up_rx_iter.next().unwrap();
             let prev_handle = handles[i - 1].clone();
             tasks.push(tokio::spawn(bridge(rx, prev_handle, Direction::Upstream)));
         }

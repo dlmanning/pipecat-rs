@@ -179,10 +179,10 @@ impl AudioResampler for SincResampler {
             if self.input_buf.len() < needed {
                 break;
             }
-            let chunk: Vec<f64> = self.input_buf.drain(..needed).collect();
             let result = resampler
-                .process(&[chunk], None)
+                .process(&[&self.input_buf[..needed]], None)
                 .expect("rubato processing should not fail with valid input");
+            self.input_buf.drain(..needed);
             output_samples.extend_from_slice(&result[0]);
         }
 

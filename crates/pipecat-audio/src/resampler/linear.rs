@@ -33,6 +33,10 @@ pub struct LinearResampler {
     last_sample: i16,
     /// Fractional position carried over from the previous chunk.
     frac_pos: f64,
+    /// Pre-allocated buffer for decoded input samples.
+    in_buf: Vec<i16>,
+    /// Pre-allocated buffer for encoded output bytes.
+    out_buf: Vec<u8>,
 }
 
 impl LinearResampler {
@@ -43,6 +47,8 @@ impl LinearResampler {
             last_resample_time: None,
             last_sample: 0,
             frac_pos: 0.0,
+            in_buf: Vec::new(),
+            out_buf: Vec::new(),
         }
     }
 
@@ -94,28 +100,31 @@ impl AudioResampler for LinearResampler {
         }
         self.last_resample_time = Some(Instant::now());
 
-        // Parse input samples.
-        let in_samples: Vec<i16> = audio
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        // Parse input samples into reusable buffer.
+        self.in_buf.clear();
+        self.in_buf.extend(
+            audio
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]])),
+        );
 
-        if in_samples.is_empty() {
+        if self.in_buf.is_empty() {
             return Bytes::new();
         }
 
         let ratio = in_rate as f64 / out_rate as f64;
-        let out_len = ((in_samples.len() as f64) / ratio).ceil() as usize;
-        let mut out_samples = Vec::with_capacity(out_len);
 
         let mut pos = self.frac_pos;
         let prev = self.last_sample;
 
-        while (pos as usize) < in_samples.len() {
+        // Encode output samples directly into reusable byte buffer.
+        self.out_buf.clear();
+
+        while (pos as usize) < self.in_buf.len() {
             let idx = pos as usize;
             let frac = pos - idx as f64;
 
-            let current = in_samples[idx];
+            let current = self.in_buf[idx];
             let sample = if frac < 1e-9 {
                 current
             } else if idx == 0 {
@@ -123,24 +132,20 @@ impl AudioResampler for LinearResampler {
                 let val = prev as f64 * (1.0 - frac) + current as f64 * frac;
                 val.round() as i16
             } else {
-                let val = in_samples[idx - 1] as f64 * (1.0 - frac) + current as f64 * frac;
+                let val =
+                    self.in_buf[idx - 1] as f64 * (1.0 - frac) + current as f64 * frac;
                 val.round() as i16
             };
 
-            out_samples.push(sample);
+            self.out_buf.extend_from_slice(&sample.to_le_bytes());
             pos += ratio;
         }
 
         // Save state for next chunk.
-        self.last_sample = *in_samples.last().unwrap();
-        self.frac_pos = pos - in_samples.len() as f64;
+        self.last_sample = *self.in_buf.last().unwrap();
+        self.frac_pos = pos - self.in_buf.len() as f64;
 
-        // Encode output.
-        let mut out = Vec::with_capacity(out_samples.len() * 2);
-        for s in &out_samples {
-            out.extend_from_slice(&s.to_le_bytes());
-        }
-        Bytes::from(out)
+        Bytes::copy_from_slice(&self.out_buf)
     }
 }
 
