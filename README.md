@@ -161,7 +161,7 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | Feature                      |              Python              |        Rust         |
 | ---------------------------- | :------------------------------: | :-----------------: |
 | VAD analyzer (state machine) |               Yes                |         Yes         |
-| Silero VAD backend           |               Yes                |          —          |
+| Silero VAD backend           |               Yes                | Yes (feature-gated) |
 | Audio mixer                  |         SoundFile mixer          |     Trait only      |
 | Audio filter                 | 6 filters (Krisp, RNNoise, etc.) |     Trait only      |
 | Resampler (linear)           |                —                 |         Yes         |

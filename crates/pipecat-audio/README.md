@@ -12,6 +12,7 @@ Audio processing utilities for pipecat-rs. Provides voice activity detection (VA
 
 ## Features
 
+- **`silero`** — Silero VAD backend via the `ort` crate (ONNX Runtime), bundles the ~2.3MB model
 - **`opus`** — Opus codec support via the `audiopus` crate
 - **`sinc-resampler`** — High-quality sinc resampling via the `rubato` crate
 
@@ -35,7 +36,7 @@ Audio processing utilities for pipecat-rs. Provides voice activity detection (VA
 pipecat-audio = { path = "crates/pipecat-audio" }
 
 # With optional features
-pipecat-audio = { path = "crates/pipecat-audio", features = ["opus", "sinc-resampler"] }
+pipecat-audio = { path = "crates/pipecat-audio", features = ["silero", "opus", "sinc-resampler"] }
 ```
 
 ## License
