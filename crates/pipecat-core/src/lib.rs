@@ -1,4 +1,5 @@
 pub mod error;
+pub mod filter;
 pub mod frame;
 pub mod metrics;
 pub mod node;

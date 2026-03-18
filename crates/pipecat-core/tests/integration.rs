@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pipecat_core::error::Result;
+use pipecat_core::filter::{FrameFilter, FunctionFilter, NullFilter};
 use pipecat_core::frame::*;
 use pipecat_core::metrics::ProcessorMetrics;
 use pipecat_core::node::ProcessorNode;
@@ -999,5 +1000,338 @@ async fn setup_called_before_frames() {
         frames_before_setup.load(Ordering::SeqCst),
         0,
         "no frames should be processed before setup()"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Filter integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn null_filter_blocks_data_in_node() {
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(NullFilter::new()));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    // Data frames should be blocked; End (after them in the normal queue) acts as
+    // a sentinel — when End appears downstream we know the data frames were processed
+    // and dropped by the filter.
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("blocked")),
+        Direction::Downstream,
+    )
+    .await;
+    send_frame(
+        &handle,
+        Frame::Transcription(TranscriptionFrame {
+            text: "blocked".into(),
+            user_id: "u1".into(),
+            timestamp: None,
+            language: None,
+            finalized: true,
+            result: None,
+        }),
+        Direction::Downstream,
+    )
+    .await;
+    send_frame(
+        &handle,
+        Frame::End(EndFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for_frame("End").await;
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+
+    down.wait_for_frame("Cancel").await;
+    assert_eq!(
+        down.frame_names(),
+        vec!["Start", "End", "Cancel"],
+        "only system + End should pass through NullFilter"
+    );
+}
+
+#[tokio::test]
+async fn frame_filter_blocks_non_matching_in_node() {
+    // Only allow Text frames (plus system/End auto-pass)
+    let filter = FrameFilter::new(|f| matches!(f, Frame::Text(_)));
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(filter));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for_frame("Start").await;
+
+    // Text (allowed), Stop (blocked), then a sentinel Text to prove Stop was
+    // processed by the filter (not skipped by a race with a later system frame).
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("first")),
+        Direction::Downstream,
+    )
+    .await;
+    send_frame(&handle, Frame::Stop(StopFrame), Direction::Downstream).await;
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("second")),
+        Direction::Downstream,
+    )
+    .await;
+    // When the sentinel arrives we know all three normal frames were processed.
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "second"))
+        .await;
+
+    // System frame: Interruption should pass through even though not in predicate
+    send_frame(
+        &handle,
+        Frame::Interruption(InterruptionFrame),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for_frame("Interruption").await;
+
+    send_frame(
+        &handle,
+        Frame::End(EndFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for_frame("End").await;
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+
+    down.wait_for_frame("Cancel").await;
+    assert_eq!(
+        down.frame_names(),
+        vec!["Start", "Text", "Text", "Interruption", "End", "Cancel"],
+        "Stop should be filtered out, system frames pass through"
+    );
+}
+
+#[tokio::test]
+async fn function_filter_direction_in_node() {
+    // Only filter downstream; upstream passes through
+    let filter =
+        FunctionFilter::new(|f| matches!(f, Frame::Text(_))).with_direction(Direction::Downstream);
+    let (node, handle, down_rx, up_rx) = make_node(Box::new(filter));
+    let down = FrameCollector::spawn(down_rx);
+    let up = FrameCollector::spawn(up_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for_frame("Start").await;
+
+    // Downstream: Text passes, Stop blocked. Sentinel Text proves Stop was filtered.
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("down")),
+        Direction::Downstream,
+    )
+    .await;
+    send_frame(&handle, Frame::Stop(StopFrame), Direction::Downstream).await;
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("sentinel")),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "sentinel"))
+        .await;
+
+    // Upstream: Stop should pass because direction filter only applies downstream
+    send_frame(&handle, Frame::Stop(StopFrame), Direction::Upstream).await;
+    up.wait_for_frame("Stop").await;
+
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+
+    down.wait_for_frame("Cancel").await;
+    assert_eq!(
+        down.frame_names(),
+        vec!["Start", "Text", "Text", "Cancel"],
+        "downstream Stop should be filtered out"
+    );
+    assert_eq!(
+        up.frame_names(),
+        vec!["Stop"],
+        "upstream Stop should pass through"
+    );
+}
+
+#[tokio::test]
+async fn filter_chained_with_processor() {
+    // Chain: FrameFilter (text only) → Uppercase
+    // Only Text frames should reach Uppercase; result should be uppercased.
+    let filter = FrameFilter::new(|f| matches!(f, Frame::Text(_)));
+    let (filter_node, filter_handle, mid_rx, _up1) = make_node(Box::new(filter));
+
+    let (final_tx, final_rx) = mpsc::channel(64);
+    let (up_tx2, _up_rx2) = mpsc::channel(64);
+    let (upper_node, upper_handle) =
+        ProcessorNode::new(Box::new(UppercaseProcessor::new()), final_tx, up_tx2, 64);
+
+    let final_down = FrameCollector::spawn(final_rx);
+
+    let upper_run = tokio::spawn(async move { upper_node.run().await });
+    let filter_run = tokio::spawn(async move { filter_node.run().await });
+
+    // Bridge filter output → uppercase input
+    let mut mid_rx = mid_rx;
+    let bridge = tokio::spawn(async move {
+        while let Some(env) = mid_rx.recv().await {
+            let is_cancel = matches!(&env.frame, Frame::Cancel(_));
+            upper_handle.send(env, Direction::Downstream).await.ok();
+            if is_cancel {
+                break;
+            }
+        }
+    });
+
+    send_frame(
+        &filter_handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    send_frame(
+        &filter_handle,
+        Frame::Text(TextFrame::new("hello")),
+        Direction::Downstream,
+    )
+    .await;
+    // Stop is a control frame, should be filtered out by FrameFilter
+    send_frame(
+        &filter_handle,
+        Frame::Stop(StopFrame),
+        Direction::Downstream,
+    )
+    .await;
+    final_down.wait_for_frame("Text").await;
+    send_frame(
+        &filter_handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    timeout(TEST_TIMEOUT, filter_run).await.unwrap().unwrap();
+    timeout(TEST_TIMEOUT, bridge).await.unwrap().unwrap();
+    timeout(TEST_TIMEOUT, upper_run).await.unwrap().unwrap();
+
+    final_down.wait_for_frame("Cancel").await;
+    let frames = final_down.frames();
+
+    // Text should be uppercased
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(&f.frame, Frame::Text(t) if t.text == "HELLO")),
+        "text should be uppercased through chain: {:?}",
+        final_down.frame_names()
+    );
+    assert_eq!(
+        final_down.frame_names(),
+        vec!["Start", "Text", "Cancel"],
+        "Stop should have been filtered out"
+    );
+}
+
+#[tokio::test]
+async fn filter_with_observer() {
+    let obs = IntegrationObserver::new();
+    let filter = FrameFilter::new(|f| matches!(f, Frame::Text(_)));
+    let (node, handle, down_rx, _up_rx) = make_observed_node(Box::new(filter), obs.clone());
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for_frame("Start").await;
+
+    // Send Text (passes filter), Stop (blocked), then a sentinel Text.
+    // When the sentinel arrives downstream, we know all three were processed
+    // by the node — so the observer must have seen Stop.
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("seen")),
+        Direction::Downstream,
+    )
+    .await;
+    send_frame(&handle, Frame::Stop(StopFrame), Direction::Downstream).await;
+    send_frame(
+        &handle,
+        Frame::Text(TextFrame::new("sentinel")),
+        Direction::Downstream,
+    )
+    .await;
+    down.wait_for(|f| matches!(f, Frame::Text(t) if t.text == "sentinel"))
+        .await;
+
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
+
+    // Observer sees all frames arriving at the processor (including filtered ones)
+    let processed = obs.process_frames.lock().unwrap();
+    assert!(
+        processed.contains(&"Stop".to_string()),
+        "observer should see Stop even though filter blocks it: {processed:?}"
+    );
+    assert!(
+        processed.contains(&"Text".to_string()),
+        "observer should see Text: {processed:?}"
+    );
+
+    // Only Text (and system) should appear downstream; Stop must not
+    down.wait_for_frame("Cancel").await;
+    assert_eq!(
+        down.frame_names(),
+        vec!["Start", "Text", "Text", "Cancel"],
+        "Stop should not appear downstream"
     );
 }

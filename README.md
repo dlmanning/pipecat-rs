@@ -260,7 +260,7 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | Feature                              |  Python   | Rust |
 | ------------------------------------ | :-------: | :--: |
 | Serializers (Protobuf, Twilio, etc.) | 7 formats |  —   |
-| Frame filters                        |  7 types  |  —   |
+| Frame filters                        |  7 types  | 4 types |
 | LLM/service switching                |    Yes    |  —   |
 | IVR / voicemail extensions           |    Yes    |  —   |
 | OpenTelemetry tracing                |    Yes    |  —   |
