@@ -11,11 +11,13 @@ AI service integrations for pipecat-rs. Provides base traits for LLM, STT, and T
 
 ## Providers
 
-| Provider   | Feature Flag | Capabilities                                                |
-| ---------- | ------------ | ----------------------------------------------------------- |
-| OpenAI     | `openai`     | LLM (Chat Completions), Realtime API (WebSocket multimodal) |
-| Deepgram   | `deepgram`   | STT (WebSocket streaming)                                   |
-| ElevenLabs | `elevenlabs` | TTS (WebSocket streaming)                                   |
+| Provider       | Feature Flag | Capabilities                                                |
+| -------------- | ------------ | ----------------------------------------------------------- |
+| OpenAI         | `openai`     | LLM (Chat Completions), Realtime API (WebSocket multimodal) |
+| Deepgram       | `deepgram`   | STT (WebSocket streaming)                                   |
+| ElevenLabs     | `elevenlabs` | STT (WebSocket realtime), TTS (WebSocket streaming)         |
+| Azure Speech   | `azure`      | STT (WebSocket), TTS (REST streaming)                       |
+| AWS Transcribe | `aws`        | STT (WebSocket with event stream binary protocol)           |
 
 ## Additional Components
 
@@ -27,7 +29,7 @@ AI service integrations for pipecat-rs. Provides base traits for LLM, STT, and T
 
 ```toml
 [dependencies]
-pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs"] }
+pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs", "azure", "aws"] }
 ```
 
 Enable only the provider features you need to keep dependencies minimal.

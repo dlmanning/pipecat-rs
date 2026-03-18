@@ -14,7 +14,7 @@ Transport In → [Processor] → [Processor] → ... → Transport Out
                  upstream                          downstream
 ```
 
-- **Frames** are a flat enum (~155 variants) wrapped in an envelope carrying metadata
+- **Frames** are a flat enum (~99 variants) wrapped in an envelope carrying metadata
 - **Processors** implement a minimal trait (`process_frame`) and are wrapped in `ProcessorNode` for priority queuing and channel management
 - **System frames** (lifecycle, interruptions) are prioritized over normal frames via `select!`
 - **Pipelines** wire processors together linearly or in parallel, managed by a task runner
@@ -45,11 +45,13 @@ pipecat-core
 
 ## Supported Providers
 
-| Provider   | Type          | Feature Flag |
-| ---------- | ------------- | ------------ |
-| OpenAI     | LLM, Realtime | `openai`     |
-| Deepgram   | STT           | `deepgram`   |
-| ElevenLabs | TTS           | `elevenlabs` |
+| Provider       | Type          | Feature Flag |
+| -------------- | ------------- | ------------ |
+| OpenAI         | LLM, Realtime | `openai`     |
+| Deepgram       | STT           | `deepgram`   |
+| ElevenLabs     | STT, TTS      | `elevenlabs` |
+| Azure Speech   | STT, TTS      | `azure`      |
+| AWS Transcribe | STT           | `aws`        |
 
 ## Getting Started
 
@@ -59,7 +61,7 @@ Add the crates you need to your `Cargo.toml`:
 [dependencies]
 pipecat-core = { path = "crates/pipecat-core" }
 pipecat-pipeline = { path = "crates/pipecat-pipeline" }
-pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs"] }
+pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs", "azure", "aws"] }
 pipecat-context = { path = "crates/pipecat-context" }
 ```
 
@@ -121,6 +123,147 @@ let pipeline = Pipeline::new(vec![
 ```
 
 A typical voice agent pipeline flows: **Transport In → STT → User Aggregator → LLM → TTS → Assistant Aggregator → Transport Out**.
+
+## Feature Matrix
+
+Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) framework.
+
+### Core
+
+| Feature                |     Python      |           Rust            |
+| ---------------------- | :-------------: | :-----------------------: |
+| Frame types            | 122 frame types |  99 variants (flat enum)  |
+| FrameProcessor base    |       Yes       |            Yes            |
+| Pipeline               |       Yes       |            Yes            |
+| ParallelPipeline       |       Yes       |            Yes            |
+| PipelineTask / Runner  |       Yes       |            Yes            |
+| Observer pattern       |       Yes       |            Yes            |
+| Metrics (TTFB, tokens) |       Yes       |            Yes            |
+| Error handling         |       Yes       | Yes (Result + ErrorFrame) |
+| Function call registry |       Yes       |            Yes            |
+
+### Transports
+
+| Transport                 | Python | Rust |
+| ------------------------- | :----: | :--: |
+| Base input/output         |  Yes   | Yes  |
+| Daily                     |  Yes   |  —   |
+| LiveKit                   |  Yes   |  —   |
+| WebSocket (client/server) |  Yes   |  —   |
+| SmallWebRTC               |  Yes   |  —   |
+| Local audio               |  Yes   |  —   |
+| HeyGen                    |  Yes   |  —   |
+| Tavus                     |  Yes   |  —   |
+| WhatsApp                  |  Yes   |  —   |
+
+### Audio
+
+| Feature                      |              Python              |        Rust         |
+| ---------------------------- | :------------------------------: | :-----------------: |
+| VAD analyzer (state machine) |               Yes                |         Yes         |
+| Silero VAD backend           |               Yes                |          —          |
+| Audio mixer                  |         SoundFile mixer          |     Trait only      |
+| Audio filter                 | 6 filters (Krisp, RNNoise, etc.) |     Trait only      |
+| Resampler (linear)           |                —                 |         Yes         |
+| Resampler (sinc)             |                —                 | Yes (feature-gated) |
+| Resampler (SoX)              |               Yes                |          —          |
+| Opus codec                   |                —                 | Yes (feature-gated) |
+| DTMF                         |               Yes                |          —          |
+
+### Turn Management
+
+| Feature                      |    Python    | Rust |
+| ---------------------------- | :----------: | :--: |
+| User turn controller         |     Yes      | Yes  |
+| VAD start strategy           |     Yes      | Yes  |
+| External start strategy      |     Yes      | Yes  |
+| Transcription start strategy |     Yes      | Yes  |
+| Min words start strategy     |     Yes      | Yes  |
+| Speech timeout stop strategy |     Yes      | Yes  |
+| External stop strategy       |     Yes      | Yes  |
+| Turn analyzer stop strategy  |     Yes      | Yes  |
+| Transcription stop strategy  |     Yes      |  —   |
+| User mute strategies         | 4 strategies |  —   |
+| User idle controller         |     Yes      |  —   |
+
+### Context & Aggregation
+
+| Feature                  | Python | Rust |
+| ------------------------ | :----: | :--: |
+| LLM context              |  Yes   | Yes  |
+| User aggregator          |  Yes   | Yes  |
+| Assistant aggregator     |  Yes   | Yes  |
+| Aggregator pair          |  Yes   | Yes  |
+| Context summarization    |  Yes   |  —   |
+| Gated context            |  Yes   |  —   |
+| Vision/image aggregation |  Yes   |  —   |
+
+### Services — LLM
+
+| Provider                  | Python | Rust |
+| ------------------------- | :----: | :--: |
+| OpenAI (Chat Completions) |  Yes   | Yes  |
+| OpenAI Realtime           |  Yes   | Yes  |
+| Anthropic Claude          |  Yes   |  —   |
+| Google Gemini             |  Yes   |  —   |
+| AWS Bedrock               |  Yes   |  —   |
+| Azure OpenAI              |  Yes   |  —   |
+| Groq                      |  Yes   |  —   |
+| Fireworks                 |  Yes   |  —   |
+| Together AI               |  Yes   |  —   |
+| Cerebras                  |  Yes   |  —   |
+| DeepSeek                  |  Yes   |  —   |
+| Mistral                   |  Yes   |  —   |
+| Ollama                    |  Yes   |  —   |
+| Others (8+)               |  Yes   |  —   |
+
+### Services — STT
+
+| Provider       | Python | Rust |
+| -------------- | :----: | :--: |
+| Deepgram       |  Yes   | Yes  |
+| ElevenLabs     |  Yes   | Yes  |
+| Azure          |  Yes   | Yes  |
+| AWS Transcribe |  Yes   | Yes  |
+| AssemblyAI     |  Yes   |  —   |
+| Google         |  Yes   |  —   |
+| Gladia         |  Yes   |  —   |
+| Speechmatics   |  Yes   |  —   |
+| Whisper        |  Yes   |  —   |
+| Others (10+)   |  Yes   |  —   |
+
+### Services — TTS
+
+| Provider     | Python | Rust |
+| ------------ | :----: | :--: |
+| ElevenLabs   |  Yes   | Yes  |
+| Azure        |  Yes   | Yes  |
+| Cartesia     |  Yes   |  —   |
+| Google       |  Yes   |  —   |
+| AWS Polly    |  Yes   |  —   |
+| Deepgram     |  Yes   |  —   |
+| LMNT         |  Yes   |  —   |
+| Kokoro       |  Yes   |  —   |
+| Others (15+) |  Yes   |  —   |
+
+### Observers
+
+| Observer                            | Python | Rust |
+| ----------------------------------- | :----: | :--: |
+| User-bot latency                    |  Yes   | Yes  |
+| Startup timing                      |  Yes   |  —   |
+| Turn tracking                       |  Yes   |  —   |
+| Debug/metrics/transcription loggers |  Yes   |  —   |
+
+### Other
+
+| Feature                              |  Python   | Rust |
+| ------------------------------------ | :-------: | :--: |
+| Serializers (Protobuf, Twilio, etc.) | 7 formats |  —   |
+| Frame filters                        |  7 types  |  —   |
+| LLM/service switching                |    Yes    |  —   |
+| IVR / voicemail extensions           |    Yes    |  —   |
+| OpenTelemetry tracing                |    Yes    |  —   |
 
 ## Building
 

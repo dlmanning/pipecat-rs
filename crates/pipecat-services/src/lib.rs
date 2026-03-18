@@ -7,6 +7,10 @@ pub mod stt;
 pub mod text_aggregator;
 pub mod tts;
 
+#[cfg(feature = "aws")]
+pub mod aws;
+#[cfg(feature = "azure")]
+pub mod azure;
 #[cfg(feature = "deepgram")]
 pub mod deepgram;
 #[cfg(feature = "elevenlabs")]

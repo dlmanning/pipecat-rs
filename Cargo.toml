@@ -51,6 +51,13 @@ base64 = "0.22"
 # Image processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+# Crypto (for AWS Sig V4)
+hmac = "0.12"
+sha2 = "0.10"
+
+# Checksums
+crc32fast = "1"
+
 # Utilities
 thiserror = "2"
 url = "2"
