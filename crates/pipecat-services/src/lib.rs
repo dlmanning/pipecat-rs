@@ -8,6 +8,7 @@ pub mod text_aggregator;
 pub mod tts;
 
 pub mod claude_code;
+#[cfg(target_os = "macos")]
 pub mod macos_say;
 
 #[cfg(feature = "aws")]
