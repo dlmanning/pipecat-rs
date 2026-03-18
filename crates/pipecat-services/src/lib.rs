@@ -17,6 +17,8 @@ pub mod deepgram;
 pub mod elevenlabs;
 #[cfg(feature = "openai")]
 pub mod openai;
+#[cfg(feature = "whisper")]
+pub mod whisper;
 
 pub use function_call::{FunctionCallHandler, FunctionCallParams, FunctionCallRegistry};
 pub use service_base::ServiceBase;

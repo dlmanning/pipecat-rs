@@ -22,6 +22,7 @@ url = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 crc32fast = { workspace = true, optional = true }
+whisper-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 pipecat-core = { workspace = true, features = ["test-utils"] }
@@ -34,3 +35,4 @@ elevenlabs = ["dep:tokio-tungstenite", "dep:base64", "dep:url"]
 openai = ["dep:reqwest", "dep:tokio-tungstenite", "dep:base64", "dep:image"]
 azure = ["dep:tokio-tungstenite", "dep:reqwest", "dep:url"]
 aws = ["dep:tokio-tungstenite", "dep:hmac", "dep:sha2", "dep:url", "dep:crc32fast"]
+whisper = ["dep:whisper-rs"]

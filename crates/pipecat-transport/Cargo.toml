@@ -13,6 +13,7 @@ bytes = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+hound = { workspace = true }
 
 [dev-dependencies]
 pipecat-core = { workspace = true, features = ["test-utils"] }

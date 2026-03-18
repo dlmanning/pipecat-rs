@@ -52,6 +52,7 @@ pipecat-core
 | ElevenLabs     | STT, TTS      | `elevenlabs` |
 | Azure Speech   | STT, TTS      | `azure`      |
 | AWS Transcribe | STT           | `aws`        |
+| Whisper (local)| STT           | `whisper`    |
 
 ## Getting Started
 
@@ -147,11 +148,11 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | Transport                 | Python | Rust |
 | ------------------------- | :----: | :--: |
 | Base input/output         |  Yes   | Yes  |
+| Local audio               |  Yes   | Yes  |
 | Daily                     |  Yes   |  —   |
 | LiveKit                   |  Yes   |  —   |
 | WebSocket (client/server) |  Yes   |  —   |
 | SmallWebRTC               |  Yes   |  —   |
-| Local audio               |  Yes   |  —   |
 | HeyGen                    |  Yes   |  —   |
 | Tavus                     |  Yes   |  —   |
 | WhatsApp                  |  Yes   |  —   |
@@ -229,7 +230,7 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | Google         |  Yes   |  —   |
 | Gladia         |  Yes   |  —   |
 | Speechmatics   |  Yes   |  —   |
-| Whisper        |  Yes   |  —   |
+| Whisper (local)|  Yes   | Yes  |
 | Others (10+)   |  Yes   |  —   |
 
 ### Services — TTS
@@ -257,13 +258,13 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 ### Other
 
-| Feature                              |  Python   | Rust |
-| ------------------------------------ | :-------: | :--: |
-| Serializers (Protobuf, Twilio, etc.) | 7 formats |  —   |
+| Feature                              |  Python   |  Rust   |
+| ------------------------------------ | :-------: | :-----: |
+| Serializers (Protobuf, Twilio, etc.) | 7 formats |    —    |
 | Frame filters                        |  7 types  | 4 types |
-| LLM/service switching                |    Yes    |  —   |
-| IVR / voicemail extensions           |    Yes    |  —   |
-| OpenTelemetry tracing                |    Yes    |  —   |
+| LLM/service switching                |    Yes    |    —    |
+| IVR / voicemail extensions           |    Yes    |    —    |
+| OpenTelemetry tracing                |    Yes    |    —    |
 
 ## Building
 

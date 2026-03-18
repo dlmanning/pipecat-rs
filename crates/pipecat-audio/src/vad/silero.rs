@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use ndarray::{Array1, Array3, ArrayView2};
-use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use tracing::{debug, error};
 

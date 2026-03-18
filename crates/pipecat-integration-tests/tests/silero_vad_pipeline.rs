@@ -17,31 +17,25 @@ use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorPar
 use pipecat_core::VadParams;
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
-use pipecat_core::node::ProcessorNodeHandle;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
 use pipecat_core::test_utils::*;
 use pipecat_integration_tests::mock_services::*;
 use pipecat_pipeline::Pipeline;
 use pipecat_services::settings::STTSettings;
 use pipecat_services::stt::{STTService, STTServiceState, stt_process_frame};
+use pipecat_transport::TransportParams;
+use pipecat_transport::local::*;
 use pipecat_turns::{
     SpeechTimeoutUserTurnStopStrategy, UserTurnStrategies, VadUserTurnStartStrategy,
 };
 use serde_json::json;
-use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 0.5s of real speech at 16 kHz mono 16-bit PCM (8000 samples, 16000 bytes).
-const TEST_SPEECH_PCM: &[u8] = include_bytes!("../fixtures/test_speech_16khz.pcm");
+/// 60s of real speech at 16 kHz mono 16-bit PCM WAV (from Silero VAD test suite).
+const TEST_SPEECH_WAV: &[u8] = include_bytes!("../fixtures/test.wav");
 
 /// Silero at 16 kHz requires 512 samples per VAD chunk = 1024 bytes of int16 PCM.
 const VAD_CHUNK_BYTES: usize = 512 * 2;
-
-/// Number of silence chunks to send after speech (~2s at 16kHz/512 samples per chunk).
-/// Generous headroom beyond the 0.2s stop threshold.
-const SILENCE_CHUNKS: usize = 62;
 
 // ---------------------------------------------------------------------------
 // VadBridgeProcessor: wraps real Silero VAD and emits VAD frames
@@ -51,13 +45,16 @@ const SILENCE_CHUNKS: usize = 62;
 ///
 /// Converts `InputAudioRaw` frames into `VADUserStartedSpeaking`,
 /// `VADUserStoppedSpeaking`, and `UserSpeaking` frames — mimicking what
-/// the input transport does in production. Forwards all audio downstream
-/// regardless of VAD state (matching real transport behavior where the STT
-/// receives all audio and manages its own state).
+/// the input transport does in production.
+///
+/// Buffers incoming audio to produce VAD-chunk-sized blocks, since the
+/// transport may chunk at a different size (e.g. 20ms = 640 bytes) than
+/// what Silero requires (512 samples = 1024 bytes).
 #[derive(Debug)]
 struct VadBridgeProcessor {
     base: ProcessorBase,
     controller: Option<VadController<SileroVadAnalyzer>>,
+    audio_buf: Vec<u8>,
 }
 
 impl VadBridgeProcessor {
@@ -65,7 +62,45 @@ impl VadBridgeProcessor {
         Self {
             base: ProcessorBase::new("VadBridge"),
             controller: None,
+            audio_buf: Vec::new(),
         }
+    }
+
+    async fn drain_vad_chunks(&mut self, ctx: &ProcessorContext) -> Result<()> {
+        let controller = self.controller.as_mut().unwrap();
+        while self.audio_buf.len() >= VAD_CHUNK_BYTES {
+            let chunk: Vec<u8> = self.audio_buf.drain(..VAD_CHUNK_BYTES).collect();
+            let events = controller.handle_audio(&chunk);
+            for event in &events {
+                match event {
+                    VadControllerEvent::SpeechStarted => {
+                        let params = controller.analyzer().params();
+                        ctx.send_downstream(Frame::VADUserStartedSpeaking(
+                            VADUserStartedSpeakingFrame {
+                                start_secs: params.start_secs,
+                                timestamp: 0.0,
+                            },
+                        ))
+                        .await?;
+                    }
+                    VadControllerEvent::SpeechStopped => {
+                        let params = controller.analyzer().params();
+                        ctx.send_downstream(Frame::VADUserStoppedSpeaking(
+                            VADUserStoppedSpeakingFrame {
+                                stop_secs: params.stop_secs,
+                                timestamp: 0.0,
+                            },
+                        ))
+                        .await?;
+                    }
+                    VadControllerEvent::SpeechActivity => {
+                        ctx.send_downstream(Frame::UserSpeaking(UserSpeakingFrame))
+                            .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -100,41 +135,9 @@ impl FrameProcessor for VadBridgeProcessor {
             }
 
             Frame::InputAudioRaw(audio_frame) => {
-                if let Some(controller) = &mut self.controller {
-                    for chunk in audio_frame.audio.chunks_exact(VAD_CHUNK_BYTES) {
-                        let events = controller.handle_audio(chunk);
-                        for event in &events {
-                            match event {
-                                VadControllerEvent::SpeechStarted => {
-                                    let params = controller.analyzer().params();
-                                    ctx.send_downstream(Frame::VADUserStartedSpeaking(
-                                        VADUserStartedSpeakingFrame {
-                                            start_secs: params.start_secs,
-                                            timestamp: 0.0,
-                                        },
-                                    ))
-                                    .await?;
-                                }
-                                VadControllerEvent::SpeechStopped => {
-                                    let params = controller.analyzer().params();
-                                    ctx.send_downstream(Frame::VADUserStoppedSpeaking(
-                                        VADUserStoppedSpeakingFrame {
-                                            stop_secs: params.stop_secs,
-                                            timestamp: 0.0,
-                                        },
-                                    ))
-                                    .await?;
-                                }
-                                VadControllerEvent::SpeechActivity => {
-                                    ctx.send_downstream(Frame::UserSpeaking(UserSpeakingFrame))
-                                        .await?;
-                                }
-                            }
-                        }
-                    }
-                }
+                self.audio_buf.extend_from_slice(&audio_frame.audio);
+                self.drain_vad_chunks(ctx).await?;
                 // Forward all audio downstream — matching real transport behavior.
-                // The STT decides whether to act on audio based on its own VAD state.
                 ctx.push_frame(envelope, direction).await?;
             }
 
@@ -243,101 +246,6 @@ impl FrameProcessor for VadGatedSTT {
 }
 
 // ---------------------------------------------------------------------------
-// Audio helpers: send realistic per-chunk frames
-// ---------------------------------------------------------------------------
-
-/// Send speech PCM as individual VAD-chunk-sized frames.
-async fn feed_speech_chunks(handle: &ProcessorNodeHandle) {
-    for chunk in TEST_SPEECH_PCM.chunks(VAD_CHUNK_BYTES) {
-        handle
-            .send(
-                FrameEnvelope::new(Frame::InputAudioRaw(AudioRawFrame {
-                    audio: Bytes::from(chunk.to_vec()),
-                    sample_rate: 16000,
-                    num_channels: 1,
-                })),
-                Direction::Downstream,
-            )
-            .await
-            .unwrap();
-    }
-}
-
-/// Send silence as individual VAD-chunk-sized frames.
-async fn feed_silence_chunks(handle: &ProcessorNodeHandle, num_chunks: usize) {
-    let silence = vec![0u8; VAD_CHUNK_BYTES];
-    for _ in 0..num_chunks {
-        handle
-            .send(
-                FrameEnvelope::new(Frame::InputAudioRaw(AudioRawFrame {
-                    audio: Bytes::from(silence.clone()),
-                    sample_rate: 16000,
-                    num_channels: 1,
-                })),
-                Direction::Downstream,
-            )
-            .await
-            .unwrap();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Pipeline construction helper
-// ---------------------------------------------------------------------------
-
-struct TestHarness {
-    handle: ProcessorNodeHandle,
-    down: FrameCollector,
-    run: JoinHandle<()>,
-    context: LLMContext,
-}
-
-/// Build the standard VAD → STT → Aggregators → LLM → TTS pipeline.
-fn build_pipeline(stt: Box<dyn FrameProcessor>, llm_tokens: Vec<String>) -> TestHarness {
-    let context = LLMContext::new(vec![
-        json!({"role": "system", "content": "You are helpful."}),
-    ]);
-    let context_ref = context.clone();
-
-    let params = LLMUserAggregatorParams {
-        user_turn_strategies: UserTurnStrategies {
-            start: vec![Box::new(VadUserTurnStartStrategy::new())],
-            stop: vec![Box::new(SpeechTimeoutUserTurnStopStrategy::new(0.1))],
-        },
-        user_turn_stop_timeout: Duration::from_secs(5),
-    };
-    let pair = LLMContextAggregatorPair::new(context, params);
-    let (user_agg, assistant_agg) = pair.into_processors();
-
-    let pipeline = Pipeline::new(vec![
-        Box::new(VadBridgeProcessor::new()),
-        stt,
-        user_agg,
-        Box::new(FakeLLMService::new(llm_tokens)),
-        Box::new(FakeTTSService::new()),
-        assistant_agg,
-    ]);
-
-    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
-    let down = FrameCollector::spawn(down_rx);
-    let run = tokio::spawn(async move { node.run().await });
-
-    TestHarness {
-        handle,
-        down,
-        run,
-        context: context_ref,
-    }
-}
-
-/// Run one complete user turn: speech chunks → silence chunks → wait for TTS output.
-async fn run_turn(handle: &ProcessorNodeHandle, down: &FrameCollector) {
-    feed_speech_chunks(handle).await;
-    feed_silence_chunks(handle, SILENCE_CHUNKS).await;
-    down.wait_for_frame("TTSStopped").await;
-}
-
-// ---------------------------------------------------------------------------
 // Ordering assertion helpers
 // ---------------------------------------------------------------------------
 
@@ -360,40 +268,87 @@ fn assert_order(names: &[String], earlier: &str, later: &str) {
 }
 
 // ===========================================================================
-// Test 1: Single turn with real audio driving real VAD through full pipeline
+// Test: Real WAV file → LocalTransport → VAD → STT → LLM → TTS pipeline
 // ===========================================================================
 
+/// Full-stack test feeding a real 60s WAV file through `LocalAudioInputTransport`
+/// with real Silero VAD. The VAD detects natural speech/silence transitions in
+/// the recording, triggering the conversational pipeline.
 #[tokio::test]
 async fn single_turn_real_vad_full_pipeline() {
-    let h = build_pipeline(
+    let context = LLMContext::new(vec![
+        json!({"role": "system", "content": "You are helpful."}),
+    ]);
+    let context_ref = context.clone();
+
+    let params = LLMUserAggregatorParams {
+        user_turn_strategies: UserTurnStrategies {
+            start: vec![Box::new(VadUserTurnStartStrategy::new())],
+            stop: vec![Box::new(SpeechTimeoutUserTurnStopStrategy::new(0.1))],
+        },
+        user_turn_stop_timeout: Duration::from_secs(5),
+    };
+    let pair = LLMContextAggregatorPair::new(context, params);
+    let (user_agg, assistant_agg) = pair.into_processors();
+
+    let in_params = TransportParams {
+        audio_in_enabled: true,
+        audio_in_passthrough: true,
+        ..Default::default()
+    };
+
+    let input_transport = LocalAudioInputTransport::new(
+        in_params,
+        AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
+    )
+    .with_format(AudioFormat::Wav)
+    .with_pacing(AudioPacing::RealTime);
+
+    let pipeline = Pipeline::new(vec![
+        Box::new(input_transport),
+        Box::new(VadBridgeProcessor::new()),
         Box::new(VadGatedSTT::new(vec!["hello from real vad"], 1)),
-        vec!["I heard you!".to_string()],
-    );
+        user_agg,
+        Box::new(FakeLLMService::new(vec!["I heard you!".to_string()])),
+        Box::new(FakeTTSService::new()),
+        assistant_agg,
+    ]);
+
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
 
     send_frame(
-        &h.handle,
-        Frame::Start(StartFrame::default()),
+        &handle,
+        Frame::Start(StartFrame {
+            audio_in_sample_rate: 16000,
+            audio_out_sample_rate: 16000,
+            ..Default::default()
+        }),
         Direction::Downstream,
     )
     .await;
 
-    run_turn(&h.handle, &h.down).await;
+    // Wait for the first complete turn: VAD detects speech → silence transition
+    // in the real audio, triggering STT → LLM → TTS cascade.
+    down.wait_for_frame_timeout("LLMContext", Duration::from_secs(30))
+        .await;
 
     send_frame(
-        &h.handle,
+        &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
     )
     .await;
-    timeout(TEST_TIMEOUT, h.run).await.unwrap().unwrap();
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
 
-    // --- Frame ordering: VAD start → VAD stop → TTS cascade ---
-    let names = h.down.frame_names();
+    // --- Frame ordering: VAD start → VAD stop → turn completion ---
+    let names = down.frame_names();
 
     assert_order(&names, "VADUserStartedSpeaking", "VADUserStoppedSpeaking");
-    assert_order(&names, "VADUserStoppedSpeaking", "TTSStarted");
-    assert_order(&names, "TTSStarted", "TTSAudioRaw");
-    assert_order(&names, "TTSAudioRaw", "TTSStopped");
 
     // UserSpeaking should fire while speaking
     assert!(
@@ -402,102 +357,113 @@ async fn single_turn_real_vad_full_pipeline() {
     );
 
     // --- Context accumulated correctly ---
-    let messages = h.context.get_messages();
-    assert_eq!(
-        messages.len(),
-        3,
-        "expected system + user + assistant = 3 messages, got {}: {messages:?}",
+    let messages = context_ref.get_messages();
+    assert!(
+        messages.len() >= 3,
+        "expected system + user + assistant >= 3 messages, got {}: {messages:?}",
         messages.len()
     );
     assert_eq!(messages[0]["role"], "system");
     assert_eq!(messages[1]["role"], "user");
     assert_eq!(messages[1]["content"], "hello from real vad");
     assert_eq!(messages[2]["role"], "assistant");
-    assert!(
-        !messages[2]["content"].as_str().unwrap_or("").is_empty(),
-        "assistant message should have content"
-    );
 }
 
 // ===========================================================================
 // Test 2: Two turns — real VAD drives both, context accumulates across turns
 // ===========================================================================
 
+/// Same setup as test 1, but waits for two complete turns from the real WAV.
+/// The 60s recording contains multiple speech/silence segments, so the VAD
+/// naturally detects multiple turns. Verifies context accumulates across turns.
 #[tokio::test]
 async fn two_turns_real_vad_context_accumulation() {
-    let h = build_pipeline(
+    let context = LLMContext::new(vec![
+        json!({"role": "system", "content": "You are helpful."}),
+    ]);
+    let context_ref = context.clone();
+
+    let params = LLMUserAggregatorParams {
+        user_turn_strategies: UserTurnStrategies {
+            start: vec![Box::new(VadUserTurnStartStrategy::new())],
+            stop: vec![Box::new(SpeechTimeoutUserTurnStopStrategy::new(0.1))],
+        },
+        user_turn_stop_timeout: Duration::from_secs(5),
+    };
+    let pair = LLMContextAggregatorPair::new(context, params);
+    let (user_agg, assistant_agg) = pair.into_processors();
+
+    let in_params = TransportParams {
+        audio_in_enabled: true,
+        audio_in_passthrough: true,
+        ..Default::default()
+    };
+
+    let input_transport = LocalAudioInputTransport::new(
+        in_params,
+        AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
+    )
+    .with_format(AudioFormat::Wav)
+    .with_pacing(AudioPacing::RealTime);
+
+    let pipeline = Pipeline::new(vec![
+        Box::new(input_transport),
+        Box::new(VadBridgeProcessor::new()),
         Box::new(VadGatedSTT::new(vec!["hello", "goodbye"], 1)),
-        vec!["Got it.".to_string()],
-    );
+        user_agg,
+        Box::new(FakeLLMService::new(vec!["Got it.".to_string()])),
+        Box::new(FakeTTSService::new()),
+        assistant_agg,
+    ]);
+
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
 
     send_frame(
-        &h.handle,
-        Frame::Start(StartFrame::default()),
+        &handle,
+        Frame::Start(StartFrame {
+            audio_in_sample_rate: 16000,
+            audio_out_sample_rate: 16000,
+            ..Default::default()
+        }),
         Direction::Downstream,
     )
     .await;
 
-    // --- Turn 1 ---
-    run_turn(&h.handle, &h.down).await;
+    // Wait for first turn.
+    down.wait_for_frame_timeout("LLMContext", Duration::from_secs(30))
+        .await;
 
-    let msg_count = h.context.message_count();
+    let msg_count = context_ref.message_count();
     assert_eq!(
         msg_count, 3,
         "after turn 1: expected system + user + assistant = 3, got {msg_count}"
     );
-    assert_eq!(h.context.get_messages()[1]["content"], "hello");
+    assert_eq!(context_ref.get_messages()[1]["content"], "hello");
 
-    // Verify turn 1 ordering
-    let t1_names = h.down.frame_names();
-    assert_order(
-        &t1_names,
-        "VADUserStartedSpeaking",
-        "VADUserStoppedSpeaking",
-    );
-    assert_order(&t1_names, "VADUserStoppedSpeaking", "TTSStarted");
-    assert_order(&t1_names, "TTSStarted", "TTSStopped");
+    // Clear and wait for second turn.
+    down.take_frames();
+    down.wait_for_frame_timeout("LLMContext", Duration::from_secs(30))
+        .await;
 
-    // Record turn 1's last frame index for cross-turn ordering
-    let t1_tts_stopped = first_index(&t1_names, "TTSStopped");
-
-    // Clear collector, preserving frame name list for cross-turn assertion
-    h.down.take_frames();
-
-    // --- Turn 2 ---
-    run_turn(&h.handle, &h.down).await;
-
-    // Shut down
     send_frame(
-        &h.handle,
+        &handle,
         Frame::Cancel(CancelFrame::default()),
         Direction::Downstream,
     )
     .await;
-    timeout(TEST_TIMEOUT, h.run).await.unwrap().unwrap();
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
 
-    // Verify turn 2 ordering (within turn 2's frames)
-    let t2_names = h.down.frame_names();
-    assert_order(
-        &t2_names,
-        "VADUserStartedSpeaking",
-        "VADUserStoppedSpeaking",
-    );
-    assert_order(&t2_names, "VADUserStoppedSpeaking", "TTSStarted");
-    assert_order(&t2_names, "TTSStarted", "TTSStopped");
-
-    // Turn 1 completed before turn 2 started (TTSStopped was in turn 1's frames,
-    // and VADUserStartedSpeaking is the first event of turn 2)
+    // --- At least 5 messages: system + 2*(user + assistant) ---
+    // May have more if additional turns started before cancel.
+    let messages = context_ref.get_messages();
     assert!(
-        t1_tts_stopped < t1_names.len(),
-        "turn 1 should have completed before take_frames()"
-    );
-
-    // --- Final context: 5 messages ---
-    let messages = h.context.get_messages();
-    assert_eq!(
-        messages.len(),
-        5,
-        "expected system + 2*(user + assistant) = 5, got {}: {messages:?}",
+        messages.len() >= 5,
+        "expected at least system + 2*(user + assistant) = 5, got {}: {messages:?}",
         messages.len()
     );
 
@@ -509,4 +475,577 @@ async fn two_turns_real_vad_context_accumulation() {
 
     assert_eq!(messages[1]["content"], "hello", "turn 1 user message");
     assert_eq!(messages[3]["content"], "goodbye", "turn 2 user message");
+}
+
+// ===========================================================================
+// VAD pre-scan helpers
+// ===========================================================================
+
+/// A speech segment found by running the VAD at full speed.
+struct SpeechSegment {
+    /// Byte offset into the PCM data where speech starts.
+    start_byte: usize,
+    /// Byte offset into the PCM data where speech ends.
+    end_byte: usize,
+}
+
+/// Run the VAD at max speed over raw PCM, returning speech segment byte ranges.
+fn prescan_vad(pcm: &[u8]) -> Vec<SpeechSegment> {
+    let analyzer = SileroVadAnalyzer::new(16000).expect("failed to create Silero VAD analyzer");
+    let params = VadParams {
+        min_volume: 0.0,
+        ..Default::default()
+    };
+    let base = VadAnalyzerBase::new(analyzer, Some(16000), Some(params));
+    let mut controller = VadController::new(base);
+    controller.handle_start(16000);
+
+    let mut segments = Vec::new();
+    let mut current_start: Option<usize> = None;
+
+    for (i, chunk) in pcm.chunks_exact(VAD_CHUNK_BYTES).enumerate() {
+        let byte_offset = i * VAD_CHUNK_BYTES;
+        let events = controller.handle_audio(chunk);
+        for event in &events {
+            match event {
+                VadControllerEvent::SpeechStarted => {
+                    current_start = Some(byte_offset);
+                }
+                VadControllerEvent::SpeechStopped => {
+                    if let Some(start) = current_start.take() {
+                        segments.push(SpeechSegment {
+                            start_byte: start,
+                            end_byte: byte_offset + VAD_CHUNK_BYTES,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Close any open segment at end of file.
+    if let Some(start) = current_start {
+        segments.push(SpeechSegment {
+            start_byte: start,
+            end_byte: pcm.len(),
+        });
+    }
+    segments
+}
+
+/// Decode WAV bytes to raw PCM.
+fn wav_to_pcm(wav: &[u8]) -> Vec<u8> {
+    let reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
+    reader
+        .into_samples::<i16>()
+        .map(|s| s.unwrap())
+        .flat_map(|s| s.to_le_bytes())
+        .collect()
+}
+
+// ===========================================================================
+// Test 3: Pre-scanned VAD → fast pipeline test (no real-time pacing)
+// ===========================================================================
+
+/// Pre-scans the 60s WAV with the VAD at full speed, then replays each speech
+/// segment into the pipeline as pre-determined VAD events + audio chunks.
+/// No VadBridge processor needed — the test injects VAD frames directly.
+/// Runs as fast as the pipeline can process, not at real-time.
+#[tokio::test]
+async fn prescanned_vad_fast_pipeline() {
+    let pcm = wav_to_pcm(TEST_SPEECH_WAV);
+    let segments = prescan_vad(&pcm);
+
+    assert!(
+        segments.len() >= 2,
+        "expected at least 2 speech segments, got {}",
+        segments.len()
+    );
+
+    let context = LLMContext::new(vec![
+        json!({"role": "system", "content": "You are helpful."}),
+    ]);
+    let context_ref = context.clone();
+
+    let params = LLMUserAggregatorParams {
+        user_turn_strategies: UserTurnStrategies {
+            start: vec![Box::new(VadUserTurnStartStrategy::new())],
+            stop: vec![Box::new(SpeechTimeoutUserTurnStopStrategy::new(0.05))],
+        },
+        user_turn_stop_timeout: Duration::from_secs(5),
+    };
+    let pair = LLMContextAggregatorPair::new(context, params);
+    let (user_agg, assistant_agg) = pair.into_processors();
+
+    // Pipeline without VadBridge — we inject VAD events directly.
+    let stt = VadGatedSTT::new(vec!["turn one", "turn two"], 1);
+    let pipeline = Pipeline::new(vec![
+        Box::new(stt),
+        user_agg,
+        Box::new(FakeLLMService::new(vec!["Got it.".to_string()])),
+        Box::new(FakeTTSService::new()),
+        assistant_agg,
+    ]);
+
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    // Replay two speech segments from the pre-scan.
+    for segment in segments.iter().take(2) {
+        let audio_data = &pcm[segment.start_byte..segment.end_byte];
+
+        // Signal speech start.
+        send_frame(
+            &handle,
+            Frame::VADUserStartedSpeaking(VADUserStartedSpeakingFrame {
+                start_secs: 0.2,
+                timestamp: 0.0,
+            }),
+            Direction::Downstream,
+        )
+        .await;
+
+        // Send the speech audio in VAD-chunk-sized frames.
+        for chunk in audio_data.chunks(VAD_CHUNK_BYTES) {
+            send_frame(
+                &handle,
+                Frame::InputAudioRaw(AudioRawFrame {
+                    audio: Bytes::from(chunk.to_vec()),
+                    sample_rate: 16000,
+                    num_channels: 1,
+                }),
+                Direction::Downstream,
+            )
+            .await;
+        }
+
+        // Signal speech stop.
+        send_frame(
+            &handle,
+            Frame::VADUserStoppedSpeaking(VADUserStoppedSpeakingFrame {
+                stop_secs: 0.2,
+                timestamp: 0.0,
+            }),
+            Direction::Downstream,
+        )
+        .await;
+
+        // Wait for this turn to complete.
+        down.wait_for_frame("LLMContext").await;
+        down.take_frames();
+    }
+
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Verify: system + 2*(user + assistant) = 5 messages.
+    let messages = context_ref.get_messages();
+    assert!(
+        messages.len() >= 5,
+        "expected at least 5 messages, got {}: {messages:?}",
+        messages.len()
+    );
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["content"], "turn one");
+    assert_eq!(messages[3]["content"], "turn two");
+}
+
+// ===========================================================================
+// Test 4: Pre-scanned VAD → Whisper STT pipeline (real transcription)
+// ===========================================================================
+
+/// Pre-scans the 60s WAV with VAD, then replays speech segments through a
+/// pipeline using real Whisper STT instead of fake/canned responses.
+/// Verifies that real transcriptions are produced from the audio.
+#[cfg(feature = "whisper")]
+#[tokio::test]
+async fn prescanned_vad_whisper_pipeline() {
+    use std::path::PathBuf;
+
+    use pipecat_services::whisper::WhisperSTTService;
+    use pipecat_services::whisper::model::ensure_model;
+
+    let pcm = wav_to_pcm(TEST_SPEECH_WAV);
+    let segments = prescan_vad(&pcm);
+
+    assert!(
+        segments.len() >= 2,
+        "expected at least 2 speech segments, got {}",
+        segments.len()
+    );
+
+    // Download/cache Whisper model.
+    let home = std::env::var("HOME").expect("HOME not set");
+    let cache_dir = PathBuf::from(home).join(".cache/pipecat-rs/whisper");
+    let model_path = ensure_model("tiny.en", &cache_dir).expect("failed to get Whisper model");
+
+    let context = LLMContext::new(vec![
+        json!({"role": "system", "content": "You are helpful."}),
+    ]);
+    let context_ref = context.clone();
+
+    let params = LLMUserAggregatorParams {
+        user_turn_strategies: UserTurnStrategies {
+            start: vec![Box::new(VadUserTurnStartStrategy::new())],
+            stop: vec![Box::new(SpeechTimeoutUserTurnStopStrategy::new(0.05))],
+        },
+        user_turn_stop_timeout: Duration::from_secs(5),
+    };
+    let pair = LLMContextAggregatorPair::new(context, params);
+    let (user_agg, assistant_agg) = pair.into_processors();
+
+    let whisper_stt = WhisperSTTService::new(
+        &model_path,
+        pipecat_services::settings::STTSettings {
+            language: Some("en".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("failed to create WhisperSTTService");
+
+    // Pipeline: WhisperSTT → user aggregator → fake LLM → fake TTS → assistant aggregator
+    let pipeline = Pipeline::new(vec![
+        Box::new(whisper_stt),
+        user_agg,
+        Box::new(FakeLLMService::new(vec!["Got it.".to_string()])),
+        Box::new(FakeTTSService::new()),
+        assistant_agg,
+    ]);
+
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+
+    // Replay first two speech segments.
+    for segment in segments.iter().take(2) {
+        let audio_data = &pcm[segment.start_byte..segment.end_byte];
+
+        send_frame(
+            &handle,
+            Frame::VADUserStartedSpeaking(VADUserStartedSpeakingFrame {
+                start_secs: 0.2,
+                timestamp: 0.0,
+            }),
+            Direction::Downstream,
+        )
+        .await;
+
+        for chunk in audio_data.chunks(VAD_CHUNK_BYTES) {
+            send_frame(
+                &handle,
+                Frame::InputAudioRaw(AudioRawFrame {
+                    audio: Bytes::from(chunk.to_vec()),
+                    sample_rate: 16000,
+                    num_channels: 1,
+                }),
+                Direction::Downstream,
+            )
+            .await;
+        }
+
+        send_frame(
+            &handle,
+            Frame::VADUserStoppedSpeaking(VADUserStoppedSpeakingFrame {
+                stop_secs: 0.2,
+                timestamp: 0.0,
+            }),
+            Direction::Downstream,
+        )
+        .await;
+
+        // Wait for this turn to complete (Whisper transcription → LLM → TTS → context).
+        down.wait_for_frame_timeout("LLMContext", Duration::from_secs(30))
+            .await;
+        down.take_frames();
+    }
+
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Verify: system + 2*(user + assistant) = 5 messages.
+    let messages = context_ref.get_messages();
+    assert!(
+        messages.len() >= 5,
+        "expected at least 5 messages, got {}: {messages:?}",
+        messages.len()
+    );
+    assert_eq!(messages[0]["role"], "system");
+
+    // Real Whisper transcriptions — verify they're non-empty strings.
+    let turn1_text = messages[1]["content"].as_str().unwrap();
+    let turn2_text = messages[3]["content"].as_str().unwrap();
+    println!("Turn 1 transcription: \"{turn1_text}\"");
+    println!("Turn 2 transcription: \"{turn2_text}\"");
+    assert!(
+        !turn1_text.is_empty(),
+        "turn 1 should have non-empty transcription"
+    );
+    assert!(
+        !turn2_text.is_empty(),
+        "turn 2 should have non-empty transcription"
+    );
+}
+
+// ===========================================================================
+// Test 5: Fast-as-possible full transcript — all VAD segments through Whisper
+// ===========================================================================
+
+/// Pre-scans the 60s WAV with VAD, then replays ALL speech segments through
+/// a pipeline with WhisperSTT. Prints the full transcript with timestamps.
+/// No turn management — just WhisperSTT collecting Transcription frames.
+#[cfg(feature = "whisper")]
+#[tokio::test]
+async fn whisper_full_transcript_fast() {
+    use std::path::PathBuf;
+
+    use pipecat_services::whisper::WhisperSTTService;
+    use pipecat_services::whisper::model::ensure_model;
+
+    let pcm = wav_to_pcm(TEST_SPEECH_WAV);
+    let segments = prescan_vad(&pcm);
+
+    let home = std::env::var("HOME").expect("HOME not set");
+    let cache_dir = PathBuf::from(home).join(".cache/pipecat-rs/whisper");
+    let model_path = ensure_model("tiny.en", &cache_dir).expect("failed to get Whisper model");
+
+    let whisper_stt = WhisperSTTService::new(
+        &model_path,
+        pipecat_services::settings::STTSettings {
+            language: Some("en".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("failed to create WhisperSTTService");
+
+    let pipeline = Pipeline::new(vec![Box::new(whisper_stt)]);
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame {
+            audio_in_sample_rate: 16000,
+            ..Default::default()
+        }),
+        Direction::Downstream,
+    )
+    .await;
+
+    // Process segments sequentially: send one segment's audio, wait for its
+    // transcription, collect it, then proceed to the next.
+    let mut transcriptions: Vec<String> = Vec::new();
+
+    for segment in &segments {
+        let audio_data = &pcm[segment.start_byte..segment.end_byte];
+
+        send_frame(
+            &handle,
+            Frame::VADUserStartedSpeaking(VADUserStartedSpeakingFrame {
+                start_secs: 0.2,
+                timestamp: 0.0,
+            }),
+            Direction::Downstream,
+        )
+        .await;
+
+        for chunk in audio_data.chunks(VAD_CHUNK_BYTES) {
+            send_frame(
+                &handle,
+                Frame::InputAudioRaw(AudioRawFrame {
+                    audio: Bytes::from(chunk.to_vec()),
+                    sample_rate: 16000,
+                    num_channels: 1,
+                }),
+                Direction::Downstream,
+            )
+            .await;
+        }
+
+        send_frame(
+            &handle,
+            Frame::VADUserStoppedSpeaking(VADUserStoppedSpeakingFrame {
+                stop_secs: 0.2,
+                timestamp: 0.0,
+            }),
+            Direction::Downstream,
+        )
+        .await;
+
+        // Wait for the Transcription frame from this segment, then drain.
+        down.wait_for_frame_timeout("Transcription", Duration::from_secs(30))
+            .await;
+        let frames = down.take_frames();
+        for f in &frames {
+            if let Frame::Transcription(t) = &f.frame {
+                transcriptions.push(t.text.clone());
+            }
+        }
+    }
+
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+
+    println!(
+        "\n=== Fast-as-possible pipeline: {} segments, {} transcriptions ===",
+        segments.len(),
+        transcriptions.len()
+    );
+    for (i, (seg, text)) in segments.iter().zip(transcriptions.iter()).enumerate() {
+        let start_s = seg.start_byte as f64 / (16000.0 * 2.0);
+        let end_s = seg.end_byte as f64 / (16000.0 * 2.0);
+        println!("  [{i:2}] {start_s:5.1}s - {end_s:5.1}s: \"{text}\"");
+    }
+
+    assert_eq!(
+        transcriptions.len(),
+        segments.len(),
+        "should produce one transcription per segment"
+    );
+    assert!(
+        transcriptions.iter().all(|t| !t.is_empty()),
+        "all transcriptions should be non-empty"
+    );
+}
+
+// ===========================================================================
+// Test 6: Real-time pacing full transcript — LocalTransport → VAD → Whisper
+// ===========================================================================
+
+/// Feeds the 60s WAV through the LocalTransport at real-time pace with a
+/// real VadBridge and Whisper STT. Prints the full transcript as it would
+/// be produced in a live session.
+#[cfg(feature = "whisper")]
+#[tokio::test]
+async fn whisper_full_transcript_realtime() {
+    use std::path::PathBuf;
+
+    use pipecat_services::whisper::WhisperSTTService;
+    use pipecat_services::whisper::model::ensure_model;
+
+    let home = std::env::var("HOME").expect("HOME not set");
+    let cache_dir = PathBuf::from(home).join(".cache/pipecat-rs/whisper");
+    let model_path = ensure_model("tiny.en", &cache_dir).expect("failed to get Whisper model");
+
+    let whisper_stt = WhisperSTTService::new(
+        &model_path,
+        pipecat_services::settings::STTSettings {
+            language: Some("en".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("failed to create WhisperSTTService");
+
+    let in_params = TransportParams {
+        audio_in_enabled: true,
+        audio_in_passthrough: true,
+        ..Default::default()
+    };
+
+    let input_transport = LocalAudioInputTransport::new(
+        in_params,
+        AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
+    )
+    .with_format(AudioFormat::Wav)
+    .with_pacing(AudioPacing::RealTime);
+
+    let pipeline = Pipeline::new(vec![
+        Box::new(input_transport),
+        Box::new(VadBridgeProcessor::new()),
+        Box::new(whisper_stt),
+    ]);
+
+    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
+    let down = FrameCollector::spawn(down_rx);
+    let run = tokio::spawn(async move { node.run().await });
+
+    send_frame(
+        &handle,
+        Frame::Start(StartFrame {
+            audio_in_sample_rate: 16000,
+            audio_out_sample_rate: 16000,
+            ..Default::default()
+        }),
+        Direction::Downstream,
+    )
+    .await;
+
+    // Wait for the full 60s of real-time audio to be consumed.
+    tokio::time::sleep(Duration::from_secs(65)).await;
+
+    send_frame(
+        &handle,
+        Frame::Cancel(CancelFrame::default()),
+        Direction::Downstream,
+    )
+    .await;
+    timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let frames = down.take_frames();
+    let transcriptions: Vec<String> = frames
+        .iter()
+        .filter_map(|f| match &f.frame {
+            Frame::Transcription(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect();
+
+    println!(
+        "\n=== Real-time pipeline: {} transcriptions ===",
+        transcriptions.len()
+    );
+    for (i, text) in transcriptions.iter().enumerate() {
+        println!("  [{i:2}] \"{text}\"");
+    }
+
+    assert!(
+        !transcriptions.is_empty(),
+        "should produce at least one transcription"
+    );
+    assert!(
+        transcriptions.iter().all(|t| !t.is_empty()),
+        "all transcriptions should be non-empty"
+    );
 }

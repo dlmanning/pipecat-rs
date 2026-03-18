@@ -85,6 +85,14 @@ impl BaseInputTransport {
         self.sample_rate
     }
 
+    /// Get a clone of the audio input sender, if the audio task is running.
+    ///
+    /// Concrete transports can use this to push audio from a spawned task
+    /// without holding a reference to the entire transport.
+    pub fn audio_in_sender(&self) -> Option<mpsc::Sender<AudioRawFrame>> {
+        self.audio_in_tx.clone()
+    }
+
     /// Push audio from the external source into the transport.
     ///
     /// Called by concrete transport implementations when audio data arrives.

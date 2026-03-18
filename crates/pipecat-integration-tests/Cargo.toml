@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = []
 silero = ["pipecat-audio/silero"]
+whisper = ["pipecat-services/whisper", "dep:whisper-rs"]
 
 [dependencies]
 pipecat-core = { workspace = true, features = ["test-utils"] }
@@ -20,3 +21,5 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }
+hound = { workspace = true }
+whisper-rs = { workspace = true, optional = true }
