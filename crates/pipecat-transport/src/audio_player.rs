@@ -326,6 +326,14 @@ impl FrameProcessor for AudioPlayer {
             Frame::InputAudioRaw(audio) => {
                 self.push_audio(audio);
             }
+            Frame::TTSAudioRaw(tts) => {
+                let audio = AudioRawFrame {
+                    audio: tts.audio.clone(),
+                    sample_rate: tts.sample_rate,
+                    num_channels: tts.num_channels,
+                };
+                self.push_audio(&audio);
+            }
             Frame::End(_) | Frame::Cancel(_) => {
                 self.drain_and_finalize().await;
             }

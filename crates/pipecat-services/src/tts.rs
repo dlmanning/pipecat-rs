@@ -129,7 +129,7 @@ pub async fn tts_process_frame(
             ctx.push_frame(envelope, direction).await?;
         }
 
-        Frame::Text(t) => {
+        Frame::Text(t) | Frame::LLMText(t) => {
             // Check skip_tts
             if t.skip_tts == Some(true) {
                 ctx.push_frame(envelope, direction).await?;

@@ -10,6 +10,13 @@ use pipecat_core::processor::{FrameProcessor, ProcessorContext};
 use tracing::info;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Redirect whisper.cpp and ggml logging to the Rust `tracing` crate,
+/// suppressing direct stderr output. If no tracing subscriber is active,
+/// the logs are silently dropped. Call before creating any `WhisperSTTService`.
+pub fn suppress_stderr_logging() {
+    whisper_rs::install_logging_hooks();
+}
+
 use crate::settings::STTSettings;
 use crate::stt::STTServiceState;
 
@@ -48,6 +55,13 @@ impl WhisperSTTService {
             audio_buf: Vec::new(),
             language,
         })
+    }
+
+    /// Set whether to forward `InputAudioRaw` frames downstream.
+    /// Default is `true`. Set to `false` when the downstream pipeline
+    /// should not receive raw mic audio (e.g., voice agent pipelines).
+    pub fn set_audio_passthrough(&mut self, enabled: bool) {
+        self.state.audio_passthrough = enabled;
     }
 
     /// Run Whisper transcription on the buffered audio and emit a TranscriptionFrame.
