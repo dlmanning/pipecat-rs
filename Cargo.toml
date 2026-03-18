@@ -58,6 +58,10 @@ sha2 = "0.10"
 # Checksums
 crc32fast = "1"
 
+# ML inference
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray"] }
+ndarray = "0.17"
+
 # Utilities
 thiserror = "2"
 url = "2"

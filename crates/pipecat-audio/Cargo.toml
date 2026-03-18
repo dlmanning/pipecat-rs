@@ -7,6 +7,7 @@ edition.workspace = true
 default = []
 opus = ["dep:audiopus"]
 sinc-resampler = ["dep:rubato"]
+silero = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 pipecat-core = { workspace = true }
@@ -22,3 +23,7 @@ audiopus = { version = "0.2", optional = true }
 
 # Optional resampler dependencies
 rubato = { version = "0.16", optional = true }
+
+# Optional Silero VAD dependencies
+ort = { workspace = true, optional = true, features = ["download-binaries", "copy-dylibs", "tls-native"] }
+ndarray = { workspace = true, optional = true }

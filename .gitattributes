@@ -1,0 +1,3 @@
+# Mark ML model and audio test data as binary
+*.onnx binary
+*.pcm binary

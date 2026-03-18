@@ -3,6 +3,10 @@ name = "pipecat-integration-tests"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+silero = ["pipecat-audio/silero"]
+
 [dependencies]
 pipecat-core = { workspace = true, features = ["test-utils"] }
 pipecat-pipeline = { workspace = true }
