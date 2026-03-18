@@ -132,8 +132,7 @@ impl AudioResampler for LinearResampler {
                 let val = prev as f64 * (1.0 - frac) + current as f64 * frac;
                 val.round() as i16
             } else {
-                let val =
-                    self.in_buf[idx - 1] as f64 * (1.0 - frac) + current as f64 * frac;
+                let val = self.in_buf[idx - 1] as f64 * (1.0 - frac) + current as f64 * frac;
                 val.round() as i16
             };
 

@@ -149,6 +149,7 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | ------------------------- | :----: | :--------: |
 | Base input/output         |  Yes   |    Yes     |
 | Local audio               |  Yes   |    Yes     |
+| Microphone input          |   —    | Yes (cpal) |
 | Audio device playback     |   —    | Yes (cpal) |
 | Daily                     |  Yes   |     —      |
 | LiveKit                   |  Yes   |     —      |
@@ -271,10 +272,11 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 See [`examples/`](examples/) for runnable demos.
 
-- **[transcribe](examples/)** — Transcribe a WAV file using Silero VAD + local Whisper STT, with optional speaker playback (`--play`)
+- **[transcribe](examples/)** — Transcribe audio using Silero VAD + local Whisper STT. Supports file input with optional speaker playback, or live microphone capture.
 
 ```bash
 cargo run -p pipecat-examples --bin transcribe -- audio.wav --play
+cargo run -p pipecat-examples --bin transcribe -- --mic
 ```
 
 ## Building

@@ -1317,15 +1317,17 @@ async fn filter_with_observer() {
     timeout(TEST_TIMEOUT, run).await.unwrap().unwrap();
 
     // Observer sees all frames arriving at the processor (including filtered ones)
-    let processed = obs.process_frames.lock().unwrap();
-    assert!(
-        processed.contains(&"Stop".to_string()),
-        "observer should see Stop even though filter blocks it: {processed:?}"
-    );
-    assert!(
-        processed.contains(&"Text".to_string()),
-        "observer should see Text: {processed:?}"
-    );
+    {
+        let processed = obs.process_frames.lock().unwrap();
+        assert!(
+            processed.contains(&"Stop".to_string()),
+            "observer should see Stop even though filter blocks it: {processed:?}"
+        );
+        assert!(
+            processed.contains(&"Text".to_string()),
+            "observer should see Text: {processed:?}"
+        );
+    }
 
     // Only Text (and system) should appear downstream; Stop must not
     down.wait_for_frame("Cancel").await;

@@ -309,7 +309,9 @@ impl<A: VadAnalyzer> VadAnalyzerBase<A> {
 
         // Process all complete chunks (Python while loop, lines 198-228)
         while self.buffer.len() >= self.vad_frames_num_bytes {
-            let confidence = self.analyzer.voice_confidence(&self.buffer[..self.vad_frames_num_bytes]);
+            let confidence = self
+                .analyzer
+                .voice_confidence(&self.buffer[..self.vad_frames_num_bytes]);
             let volume = self.get_smoothed_volume(&self.buffer[..self.vad_frames_num_bytes]);
             self.buffer.drain(..self.vad_frames_num_bytes);
             self.prev_volume = volume;
