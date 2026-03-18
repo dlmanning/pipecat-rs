@@ -7,12 +7,12 @@ pub mod stt;
 pub mod text_aggregator;
 pub mod tts;
 
+pub mod claude_code;
+
 #[cfg(feature = "aws")]
 pub mod aws;
 #[cfg(feature = "azure")]
 pub mod azure;
-#[cfg(feature = "claude-code")]
-pub mod claude_code;
 #[cfg(feature = "deepgram")]
 pub mod deepgram;
 #[cfg(feature = "elevenlabs")]

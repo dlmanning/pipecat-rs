@@ -47,7 +47,7 @@ pipecat-core
 
 | Provider        | Type          | Feature Flag  |
 | --------------- | ------------- | ------------- |
-| Claude Code     | LLM           | `claude-code` |
+| Claude Code     | LLM           | *(always on)* |
 | OpenAI          | LLM, Realtime | `openai`      |
 | Deepgram        | STT           | `deepgram`    |
 | ElevenLabs      | STT, TTS      | `elevenlabs`  |
@@ -63,7 +63,7 @@ Add the crates you need to your `Cargo.toml`:
 [dependencies]
 pipecat-core = { path = "crates/pipecat-core" }
 pipecat-pipeline = { path = "crates/pipecat-pipeline" }
-pipecat-services = { path = "crates/pipecat-services", features = ["claude-code", "openai", "deepgram", "elevenlabs", "azure", "aws"] }
+pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs", "azure", "aws"] }
 pipecat-context = { path = "crates/pipecat-context" }
 ```
 
