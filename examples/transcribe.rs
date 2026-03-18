@@ -17,8 +17,8 @@ use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
 use pipecat_pipeline::{Pipeline, PipelineParams, PipelineTask};
+use pipecat_transport::TransportParams;
 use pipecat_transport::local::*;
-use pipecat_transport::{DeviceConfig, TransportParams};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Pre-speech audio buffer: 1 second at 16 kHz mono 16-bit PCM.
@@ -228,48 +228,6 @@ impl FrameProcessor for WhisperTranscribeProcessor {
 }
 
 // ---------------------------------------------------------------------------
-// InputToOutputAudio — re-emits InputAudioRaw as OutputAudioRaw
-// ---------------------------------------------------------------------------
-
-/// Converts `InputAudioRaw` frames to `OutputAudioRaw` so they can be played
-/// by a `LocalAudioOutputTransport`. All other frames pass through unchanged.
-#[derive(Debug)]
-struct InputToOutputAudio {
-    base: ProcessorBase,
-}
-
-impl InputToOutputAudio {
-    fn new() -> Self {
-        Self {
-            base: ProcessorBase::new("InputToOutputAudio"),
-        }
-    }
-}
-
-#[async_trait]
-impl FrameProcessor for InputToOutputAudio {
-    fn name(&self) -> &str {
-        self.base.name()
-    }
-    fn id(&self) -> u64 {
-        self.base.id()
-    }
-
-    async fn process_frame(
-        &mut self,
-        envelope: FrameEnvelope,
-        direction: Direction,
-        ctx: &ProcessorContext,
-    ) -> Result<()> {
-        if let Frame::InputAudioRaw(ref audio) = envelope.frame {
-            let out = FrameEnvelope::new(Frame::OutputAudioRaw(audio.clone()));
-            ctx.push_frame(out, direction).await?;
-        }
-        ctx.push_frame(envelope, direction).await
-    }
-}
-
-// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -334,22 +292,9 @@ fn main() {
     let mut processors: Vec<Box<dyn FrameProcessor>> =
         vec![Box::new(input_transport), Box::new(vad_processor)];
 
-    // When playing audio, insert the converter and output transport BEFORE
-    // whisper so that audio flows to the speakers without being blocked by
-    // whisper inference stalls.
     if args.play {
-        processors.push(Box::new(InputToOutputAudio::new()));
-
-        let out_params = TransportParams {
-            audio_out_enabled: true,
-            audio_out_sample_rate: Some(16000),
-            ..Default::default()
-        };
-        let output_transport = LocalAudioOutputTransport::new(
-            out_params,
-            AudioOutputSink::Device(DeviceConfig::default()),
-        );
-        processors.push(Box::new(output_transport));
+        use pipecat_transport::{AudioPlayer, AudioPlayerConfig};
+        processors.push(Box::new(AudioPlayer::new(AudioPlayerConfig::default())));
     }
 
     processors.push(Box::new(whisper_processor));
