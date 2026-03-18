@@ -15,6 +15,7 @@ pipecat-transport = { workspace = true, features = ["cpal"] }
 pipecat-audio = { workspace = true, features = ["silero"] }
 pipecat-services = { workspace = true, features = ["whisper"] }
 tokio = { workspace = true }
+clap = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 hound = { workspace = true }

@@ -1,7 +1,7 @@
 //! Transcribe a WAV file using Silero VAD + Whisper STT.
 //!
 //! ```text
-//! cargo run -p pipecat-examples --bin transcribe -- <audio.wav> [--fast|--realtime] [--play]
+//! cargo run -p pipecat-examples --bin transcribe -- <audio.wav> [--realtime] [--play]
 //! ```
 
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use clap::Parser;
 use pipecat_audio::vad::{SileroVadAnalyzer, VadController, VadProcessor};
 use pipecat_core::VadParams;
 use pipecat_core::error::Result;
@@ -28,72 +29,27 @@ const PRE_SPEECH_BYTES: usize = 16000 * 2;
 // CLI
 // ---------------------------------------------------------------------------
 
+/// Transcribe a WAV file using Silero VAD + Whisper STT.
+#[derive(Parser)]
 struct Args {
+    /// WAV file to transcribe
     audio_file: PathBuf,
-    mode: Mode,
-    model: String,
-    language: String,
+
+    /// Process audio at real-time pace (default: as fast as possible)
+    #[arg(long)]
+    realtime: bool,
+
+    /// Play audio through default output device (implies --realtime)
+    #[arg(long)]
     play: bool,
-}
 
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Fast,
-    Realtime,
-}
+    /// Whisper GGML model name
+    #[arg(long, default_value = "tiny.en")]
+    model: String,
 
-fn parse_args() -> Args {
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() < 2 || args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!(
-            "Usage: transcribe <audio.wav> [--fast|--realtime] [--play] [--model <name>] [--language <lang>]"
-        );
-        eprintln!();
-        eprintln!("Options:");
-        eprintln!("  --fast       Transcribe as fast as possible (default)");
-        eprintln!("  --realtime   Process audio at real-time pace");
-        eprintln!("  --play       Play audio through default output device");
-        eprintln!("  --model      Whisper GGML model name (default: tiny.en)");
-        eprintln!("  --language   Language code (default: en)");
-        std::process::exit(if args.len() < 2 { 1 } else { 0 });
-    }
-
-    let audio_file = PathBuf::from(&args[1]);
-    let mut mode = Mode::Fast;
-    let mut model = "tiny.en".to_string();
-    let mut language = "en".to_string();
-    let mut play = false;
-
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--fast" => mode = Mode::Fast,
-            "--realtime" => mode = Mode::Realtime,
-            "--play" => play = true,
-            "--model" => {
-                i += 1;
-                model = args.get(i).expect("--model requires a value").clone();
-            }
-            "--language" => {
-                i += 1;
-                language = args.get(i).expect("--language requires a value").clone();
-            }
-            other => {
-                eprintln!("Unknown option: {other}");
-                std::process::exit(1);
-            }
-        }
-        i += 1;
-    }
-
-    Args {
-        audio_file,
-        mode,
-        model,
-        language,
-        play,
-    }
+    /// Language code
+    #[arg(long, default_value = "en")]
+    language: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +190,7 @@ impl FrameProcessor for WhisperTranscribeProcessor {
 fn main() {
     whisper_rs::install_logging_hooks();
 
-    let args = parse_args();
+    let args = Args::parse();
 
     let home = std::env::var("HOME").expect("HOME not set");
     let cache_dir = PathBuf::from(home).join(".cache/pipecat-rs/whisper");
@@ -251,8 +207,8 @@ fn main() {
     );
     eprintln!("Model loaded.\n");
 
-    let pacing = if args.play || args.mode == Mode::Realtime {
-        if args.play && args.mode == Mode::Fast {
+    let pacing = if args.play || args.realtime {
+        if args.play && !args.realtime {
             eprintln!("Note: --play forces real-time pacing");
         }
         AudioPacing::RealTime

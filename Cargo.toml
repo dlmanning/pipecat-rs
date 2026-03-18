@@ -68,6 +68,9 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray"
 ndarray = "0.17"
 whisper-rs = "0.16"
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+
 # Utilities
 thiserror = "2"
 url = "2"
