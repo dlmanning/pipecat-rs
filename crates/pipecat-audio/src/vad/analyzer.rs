@@ -265,6 +265,35 @@ impl<A: VadAnalyzer> VadAnalyzerBase<A> {
         self.recalculate();
     }
 
+    /// Bytes required for one analysis chunk.
+    pub fn chunk_size(&self) -> usize {
+        self.vad_frames_num_bytes
+    }
+
+    /// Process exactly one chunk-sized buffer. No internal buffering —
+    /// the caller is responsible for feeding exactly `chunk_size()` bytes.
+    ///
+    /// Returns the current state and any transition event. Unlike
+    /// `analyze_audio`, this calls `finalize()` after each chunk, so it
+    /// can detect transitions on every call.
+    pub fn process_chunk(&mut self, chunk: &[u8]) -> (VadState, Option<VadEvent>) {
+        debug_assert_eq!(
+            chunk.len(),
+            self.vad_frames_num_bytes,
+            "process_chunk requires exactly chunk_size() bytes"
+        );
+
+        let confidence = self.analyzer.voice_confidence(chunk);
+        let volume = self.get_smoothed_volume(chunk);
+        self.prev_volume = volume;
+
+        let speaking = confidence >= self.params.confidence && volume >= self.params.min_volume;
+        self.state_machine.update(speaking);
+        let event = self.state_machine.finalize();
+
+        (self.state_machine.state().clone(), event)
+    }
+
     /// Analyze an audio buffer. Accumulates audio, processes in chunks,
     /// runs the state machine, and returns the current state plus any
     /// transition event.

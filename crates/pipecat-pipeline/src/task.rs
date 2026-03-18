@@ -525,6 +525,9 @@ impl PipelineTask {
         let cancel_timeout = self.params.cancel_timeout;
         let mut terminal_frame: Option<Frame> = None;
 
+        let ended_wait = self.ended.notified();
+        tokio::pin!(ended_wait);
+
         loop {
             tokio::select! {
                 frame = push_rx.recv() => {
@@ -562,6 +565,13 @@ impl PipelineTask {
                         }
                         break;
                     }
+                }
+                // EndFrame originated inside the pipeline (e.g. transport
+                // buffer exhausted) — the sink monitor detects it and
+                // notifies us here.
+                _ = &mut ended_wait => {
+                    debug!("PipelineTask: pipeline ended (internal EndFrame)");
+                    break;
                 }
                 result = &mut node_task => {
                     // Node exited unexpectedly (panic or early shutdown).

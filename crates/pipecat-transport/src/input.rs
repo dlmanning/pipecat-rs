@@ -44,6 +44,8 @@ pub struct BaseInputTransport {
     // Audio task communication
     audio_in_tx: Option<mpsc::Sender<AudioRawFrame>>,
     audio_task: Option<JoinHandle<()>>,
+    /// Notified when the audio task exits after draining all queued frames.
+    audio_drained: Arc<tokio::sync::Notify>,
 
     // Filter wrapped for sharing with the audio task.
     // Taken from params on start, wrapped in Arc<Mutex<>>.
@@ -62,6 +64,7 @@ impl BaseInputTransport {
             paused: false,
             audio_in_tx: None,
             audio_task: None,
+            audio_drained: Arc::new(tokio::sync::Notify::new()),
             filter: None,
             ctx: None,
         }
@@ -75,6 +78,7 @@ impl BaseInputTransport {
             paused: false,
             audio_in_tx: None,
             audio_task: None,
+            audio_drained: Arc::new(tokio::sync::Notify::new()),
             filter: None,
             ctx: None,
         }
@@ -91,6 +95,22 @@ impl BaseInputTransport {
     /// without holding a reference to the entire transport.
     pub fn audio_in_sender(&self) -> Option<mpsc::Sender<AudioRawFrame>> {
         self.audio_in_tx.clone()
+    }
+
+    /// Take the audio input sender, removing it from the transport.
+    ///
+    /// Use this instead of `audio_in_sender()` for finite sources where the
+    /// caller is the sole producer. When the caller drops the returned sender,
+    /// the audio channel closes and the audio task drains and exits.
+    pub fn take_audio_in_sender(&mut self) -> Option<mpsc::Sender<AudioRawFrame>> {
+        self.audio_in_tx.take()
+    }
+
+    /// Returns a `Notify` that fires when the audio task exits after draining
+    /// all queued frames. Useful for finite audio sources that need to send
+    /// `EndFrame` only after all audio has been processed.
+    pub fn audio_drained_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.audio_drained.clone()
     }
 
     /// Push audio from the external source into the transport.
@@ -193,8 +213,12 @@ impl BaseInputTransport {
         let ctx = ctx.clone();
         let passthrough = self.params.audio_in_passthrough;
         let filter = self.filter.clone();
+        let drained = self.audio_drained.clone();
 
-        self.audio_task = Some(tokio::spawn(audio_input_task(ctx, rx, passthrough, filter)));
+        self.audio_task = Some(tokio::spawn(async move {
+            audio_input_task(ctx, rx, passthrough, filter).await;
+            drained.notify_one();
+        }));
     }
 
     async fn cancel_audio_task(&mut self) {

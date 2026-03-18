@@ -1,19 +1,25 @@
 //! Transcribe a WAV file using Silero VAD + Whisper STT.
 //!
 //! ```text
-//! cargo run -p pipecat-examples --bin transcribe -- <audio.wav> [--fast|--realtime]
+//! cargo run -p pipecat-examples --bin transcribe -- <audio.wav> [--fast|--realtime] [--play]
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use pipecat_audio::vad::{SileroVadAnalyzer, VadAnalyzerBase, VadController, VadControllerEvent};
+use async_trait::async_trait;
+use bytes::Bytes;
+use pipecat_audio::vad::{SileroVadAnalyzer, VadController, VadProcessor};
 use pipecat_core::VadParams;
+use pipecat_core::error::Result;
+use pipecat_core::frame::*;
+use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use pipecat_pipeline::{Pipeline, PipelineParams, PipelineTask};
+use pipecat_transport::local::*;
+use pipecat_transport::{DeviceConfig, TransportParams};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
-
-/// Silero at 16 kHz: 512 samples per VAD chunk = 1024 bytes of int16 PCM.
-const VAD_CHUNK_BYTES: usize = 512 * 2;
 
 /// Pre-speech audio buffer: 1 second at 16 kHz mono 16-bit PCM.
 const PRE_SPEECH_BYTES: usize = 16000 * 2;
@@ -27,6 +33,7 @@ struct Args {
     mode: Mode,
     model: String,
     language: String,
+    play: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -40,12 +47,13 @@ fn parse_args() -> Args {
 
     if args.len() < 2 || args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!(
-            "Usage: transcribe <audio.wav> [--fast|--realtime] [--model <name>] [--language <lang>]"
+            "Usage: transcribe <audio.wav> [--fast|--realtime] [--play] [--model <name>] [--language <lang>]"
         );
         eprintln!();
         eprintln!("Options:");
-        eprintln!("  --fast       Pre-scan VAD, transcribe as fast as possible (default)");
+        eprintln!("  --fast       Transcribe as fast as possible (default)");
         eprintln!("  --realtime   Process audio at real-time pace");
+        eprintln!("  --play       Play audio through default output device");
         eprintln!("  --model      Whisper GGML model name (default: tiny.en)");
         eprintln!("  --language   Language code (default: en)");
         std::process::exit(if args.len() < 2 { 1 } else { 0 });
@@ -55,12 +63,14 @@ fn parse_args() -> Args {
     let mut mode = Mode::Fast;
     let mut model = "tiny.en".to_string();
     let mut language = "en".to_string();
+    let mut play = false;
 
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
             "--fast" => mode = Mode::Fast,
             "--realtime" => mode = Mode::Realtime,
+            "--play" => play = true,
             "--model" => {
                 i += 1;
                 model = args.get(i).expect("--model requires a value").clone();
@@ -82,80 +92,46 @@ fn parse_args() -> Args {
         mode,
         model,
         language,
+        play,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers
+// WhisperTranscribeProcessor — prints each segment as it's transcribed
 // ---------------------------------------------------------------------------
 
-struct SpeechSegment {
-    start_byte: usize,
-    end_byte: usize,
+#[derive(Debug)]
+struct WhisperTranscribeProcessor {
+    base: ProcessorBase,
+    whisper_ctx: Arc<WhisperContext>,
+    language: String,
+    /// Audio buffer: rolling 1s pre-speech window, accumulates during speech.
+    audio_buf: Vec<u8>,
+    /// Total audio bytes seen so far (for timestamp computation).
+    total_audio_bytes: usize,
+    user_speaking: bool,
+    /// Byte offset where current segment's buffered audio begins.
+    segment_start_bytes: usize,
+    segment_count: Arc<AtomicUsize>,
 }
 
-fn wav_to_pcm(path: &Path) -> Vec<u8> {
-    let reader = hound::WavReader::open(path).unwrap_or_else(|e| {
-        eprintln!("Failed to open {}: {e}", path.display());
-        std::process::exit(1);
-    });
-    let spec = reader.spec();
-    assert_eq!(
-        spec.channels, 1,
-        "expected mono audio, got {} channels",
-        spec.channels
-    );
-    assert_eq!(
-        spec.sample_rate, 16000,
-        "expected 16 kHz, got {} Hz",
-        spec.sample_rate
-    );
-    reader
-        .into_samples::<i16>()
-        .map(|s| s.unwrap())
-        .flat_map(|s| s.to_le_bytes())
-        .collect()
-}
-
-fn prescan_vad(pcm: &[u8]) -> Vec<SpeechSegment> {
-    let analyzer = SileroVadAnalyzer::new(16000).expect("failed to create VAD");
-    let params = VadParams {
-        min_volume: 0.0,
-        ..Default::default()
-    };
-    let base = VadAnalyzerBase::new(analyzer, Some(16000), Some(params));
-    let mut controller = VadController::new(base);
-    controller.handle_start(16000);
-
-    let mut segments = Vec::new();
-    let mut current_start: Option<usize> = None;
-
-    for (i, chunk) in pcm.chunks_exact(VAD_CHUNK_BYTES).enumerate() {
-        let byte_offset = i * VAD_CHUNK_BYTES;
-        for event in controller.handle_audio(chunk) {
-            match event {
-                VadControllerEvent::SpeechStarted => {
-                    current_start = Some(byte_offset);
-                }
-                VadControllerEvent::SpeechStopped => {
-                    if let Some(start) = current_start.take() {
-                        segments.push(SpeechSegment {
-                            start_byte: start,
-                            end_byte: byte_offset + VAD_CHUNK_BYTES,
-                        });
-                    }
-                }
-                _ => {}
-            }
+impl WhisperTranscribeProcessor {
+    fn new(
+        whisper_ctx: Arc<WhisperContext>,
+        language: String,
+        segment_count: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            base: ProcessorBase::new("WhisperTranscribe"),
+            whisper_ctx,
+            language,
+            audio_buf: Vec::new(),
+            total_audio_bytes: 0,
+            user_speaking: false,
+            segment_start_bytes: 0,
+            segment_count,
         }
     }
-    if let Some(start) = current_start {
-        segments.push(SpeechSegment {
-            start_byte: start,
-            end_byte: pcm.len(),
-        });
-    }
-    segments
 }
 
 fn byte_offset_to_secs(offset: usize) -> f64 {
@@ -190,248 +166,107 @@ fn whisper_transcribe(ctx: &WhisperContext, audio: &[u8], language: &str) -> Str
     text.trim().to_string()
 }
 
-fn print_results(header: &str, results: &[(f64, String)]) {
-    println!("{header}\n");
-    for (timestamp, text) in results {
-        println!("[{timestamp:6.1}s] \"{text}\"");
+#[async_trait]
+impl FrameProcessor for WhisperTranscribeProcessor {
+    fn name(&self) -> &str {
+        self.base.name()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Fast mode: pre-scan VAD, transcribe segments at full speed
-// ---------------------------------------------------------------------------
-
-fn run_fast(pcm: &[u8], whisper_ctx: &WhisperContext, language: &str) {
-    let start = Instant::now();
-    let segments = prescan_vad(pcm);
-
-    let mut results = Vec::new();
-    for segment in &segments {
-        let audio = &pcm[segment.start_byte..segment.end_byte];
-        let text = whisper_transcribe(whisper_ctx, audio, language);
-        if !text.is_empty() {
-            results.push((byte_offset_to_secs(segment.start_byte), text));
-        }
+    fn id(&self) -> u64 {
+        self.base.id()
     }
 
-    let elapsed = start.elapsed().as_secs_f64();
-    let audio_dur = byte_offset_to_secs(pcm.len());
-    print_results(
-        &format!(
-            "Fast pipeline ({elapsed:.2}s for {audio_dur:.0}s audio, {} segments)",
-            results.len()
-        ),
-        &results,
-    );
-}
+    async fn process_frame(
+        &mut self,
+        envelope: FrameEnvelope,
+        direction: Direction,
+        ctx: &ProcessorContext,
+    ) -> Result<()> {
+        match &envelope.frame {
+            Frame::InputAudioRaw(audio) => {
+                self.total_audio_bytes += audio.audio.len();
+                self.audio_buf.extend_from_slice(&audio.audio);
 
-// ---------------------------------------------------------------------------
-// Real-time mode: LocalTransport → VAD + Whisper processor
-// ---------------------------------------------------------------------------
-
-fn run_realtime(audio_file: &Path, whisper_ctx: Arc<WhisperContext>, language: &str) {
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(run_realtime_inner(audio_file, whisper_ctx, language));
-}
-
-async fn run_realtime_inner(audio_file: &Path, whisper_ctx: Arc<WhisperContext>, language: &str) {
-    use std::time::Duration;
-
-    use async_trait::async_trait;
-    use bytes::Bytes;
-    use pipecat_core::error::Result;
-    use pipecat_core::frame::*;
-    use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
-    use pipecat_core::test_utils::*;
-    use pipecat_pipeline::Pipeline;
-    use pipecat_transport::TransportParams;
-    use pipecat_transport::local::*;
-    use tokio::time::timeout;
-
-    let wav_data = std::fs::read(audio_file).expect("failed to read audio file");
-    let audio_duration_s = {
-        let reader = hound::WavReader::new(std::io::Cursor::new(&wav_data)).unwrap();
-        reader.len() as f64 / reader.spec().sample_rate as f64
-    };
-
-    let results: Arc<std::sync::Mutex<Vec<(f64, String)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    // Combined VAD + Whisper processor: detects speech segments in the audio
-    // stream, buffers audio during speech, and transcribes on speech stop.
-    #[derive(Debug)]
-    struct VadWhisperProcessor {
-        base: ProcessorBase,
-        controller: Option<VadController<SileroVadAnalyzer>>,
-        whisper_ctx: Arc<WhisperContext>,
-        language: String,
-        /// Audio buffer: rolling 1s pre-speech window, accumulates during speech.
-        audio_buf: Vec<u8>,
-        /// Partial VAD-chunk buffer (transport chunks != VAD chunks).
-        vad_buf: Vec<u8>,
-        /// Total audio bytes seen so far (for timestamp computation).
-        total_audio_bytes: usize,
-        user_speaking: bool,
-        /// Byte offset where current segment's buffered audio begins.
-        segment_start_bytes: usize,
-        results: Arc<std::sync::Mutex<Vec<(f64, String)>>>,
-    }
-
-    #[async_trait]
-    impl FrameProcessor for VadWhisperProcessor {
-        fn name(&self) -> &str {
-            self.base.name()
-        }
-        fn id(&self) -> u64 {
-            self.base.id()
-        }
-
-        async fn process_frame(
-            &mut self,
-            envelope: FrameEnvelope,
-            direction: Direction,
-            ctx: &ProcessorContext,
-        ) -> Result<()> {
-            match &envelope.frame {
-                Frame::Start(_) => {
-                    let analyzer = SileroVadAnalyzer::new(16000).unwrap();
-                    let params = VadParams {
-                        min_volume: 0.0,
-                        ..Default::default()
-                    };
-                    let base = VadAnalyzerBase::new(analyzer, Some(16000), Some(params));
-                    let mut controller = VadController::new(base);
-                    controller.handle_start(16000);
-                    self.controller = Some(controller);
-                    ctx.push_frame(envelope, direction).await?;
+                if !self.user_speaking && self.audio_buf.len() > PRE_SPEECH_BYTES {
+                    let excess = self.audio_buf.len() - PRE_SPEECH_BYTES;
+                    self.audio_buf.drain(..excess);
                 }
-
-                Frame::InputAudioRaw(audio) => {
-                    self.total_audio_bytes += audio.audio.len();
-                    self.audio_buf.extend_from_slice(&audio.audio);
-                    self.vad_buf.extend_from_slice(&audio.audio);
-
-                    // Trim pre-speech buffer when not speaking.
-                    if !self.user_speaking && self.audio_buf.len() > PRE_SPEECH_BYTES {
-                        let excess = self.audio_buf.len() - PRE_SPEECH_BYTES;
-                        self.audio_buf.drain(..excess);
-                    }
-
-                    // Feed VAD in chunk-sized blocks.
-                    if let Some(controller) = &mut self.controller {
-                        while self.vad_buf.len() >= VAD_CHUNK_BYTES {
-                            let chunk: Vec<u8> = self.vad_buf.drain(..VAD_CHUNK_BYTES).collect();
-                            for event in controller.handle_audio(&chunk) {
-                                match event {
-                                    VadControllerEvent::SpeechStarted => {
-                                        self.user_speaking = true;
-                                        self.segment_start_bytes =
-                                            self.total_audio_bytes - self.audio_buf.len();
-                                    }
-                                    VadControllerEvent::SpeechStopped => {
-                                        self.user_speaking = false;
-                                        let start_secs =
-                                            byte_offset_to_secs(self.segment_start_bytes);
-                                        let audio_data = std::mem::take(&mut self.audio_buf);
-                                        let wctx = self.whisper_ctx.clone();
-                                        let lang = self.language.clone();
-
-                                        let text = tokio::task::spawn_blocking(move || {
-                                            whisper_transcribe(&wctx, &audio_data, &lang)
-                                        })
-                                        .await
-                                        .unwrap();
-
-                                        if !text.is_empty() {
-                                            eprint!(".");
-                                            self.results.lock().unwrap().push((start_secs, text));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    ctx.push_frame(envelope, direction).await?;
-                }
-
-                _ => {
-                    ctx.push_frame(envelope, direction).await?;
-                }
+                ctx.push_frame(envelope, direction).await?;
             }
-            Ok(())
+
+            Frame::VADUserStartedSpeaking(_) => {
+                self.user_speaking = true;
+                self.segment_start_bytes = self.total_audio_bytes - self.audio_buf.len();
+                ctx.push_frame(envelope, direction).await?;
+            }
+
+            Frame::VADUserStoppedSpeaking(_) => {
+                self.user_speaking = false;
+                let start_secs = byte_offset_to_secs(self.segment_start_bytes);
+                let audio_data = std::mem::take(&mut self.audio_buf);
+                let wctx = self.whisper_ctx.clone();
+                let lang = self.language.clone();
+
+                let text = tokio::task::spawn_blocking(move || {
+                    whisper_transcribe(&wctx, &audio_data, &lang)
+                })
+                .await
+                .unwrap();
+
+                if !text.is_empty() {
+                    self.segment_count.fetch_add(1, Ordering::Relaxed);
+                    println!("[{start_secs:6.1}s] \"{text}\"");
+                }
+                ctx.push_frame(envelope, direction).await?;
+            }
+
+            _ => {
+                ctx.push_frame(envelope, direction).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InputToOutputAudio — re-emits InputAudioRaw as OutputAudioRaw
+// ---------------------------------------------------------------------------
+
+/// Converts `InputAudioRaw` frames to `OutputAudioRaw` so they can be played
+/// by a `LocalAudioOutputTransport`. All other frames pass through unchanged.
+#[derive(Debug)]
+struct InputToOutputAudio {
+    base: ProcessorBase,
+}
+
+impl InputToOutputAudio {
+    fn new() -> Self {
+        Self {
+            base: ProcessorBase::new("InputToOutputAudio"),
         }
     }
+}
 
-    let processor = VadWhisperProcessor {
-        base: ProcessorBase::new("VadWhisper"),
-        controller: None,
-        whisper_ctx,
-        language: language.to_string(),
-        audio_buf: Vec::new(),
-        vad_buf: Vec::new(),
-        total_audio_bytes: 0,
-        user_speaking: false,
-        segment_start_bytes: 0,
-        results: results.clone(),
-    };
+#[async_trait]
+impl FrameProcessor for InputToOutputAudio {
+    fn name(&self) -> &str {
+        self.base.name()
+    }
+    fn id(&self) -> u64 {
+        self.base.id()
+    }
 
-    let in_params = TransportParams {
-        audio_in_enabled: true,
-        ..Default::default()
-    };
-    let input_transport =
-        LocalAudioInputTransport::new(in_params, AudioInputSource::Buffer(Bytes::from(wav_data)))
-            .with_format(AudioFormat::Wav)
-            .with_pacing(AudioPacing::RealTime);
-
-    let pipeline = Pipeline::new(vec![Box::new(input_transport), Box::new(processor)]);
-
-    let (node, handle, down_rx, _up_rx) = make_node(Box::new(pipeline));
-    let _down = FrameCollector::spawn(down_rx);
-    let run = tokio::spawn(async move { node.run().await });
-
-    let start = Instant::now();
-
-    send_frame(
-        &handle,
-        Frame::Start(StartFrame {
-            audio_in_sample_rate: 16000,
-            ..Default::default()
-        }),
-        Direction::Downstream,
-    )
-    .await;
-
-    // Wait for real-time audio playback to complete.
-    let wait_secs = audio_duration_s as u64 + 5;
-    eprintln!(
-        "Processing {audio_duration_s:.0}s of audio at real-time pace ({wait_secs}s timeout)"
-    );
-    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
-
-    send_frame(
-        &handle,
-        Frame::Cancel(CancelFrame::default()),
-        Direction::Downstream,
-    )
-    .await;
-    timeout(Duration::from_secs(10), run)
-        .await
-        .unwrap()
-        .unwrap();
-    eprintln!();
-
-    let elapsed = start.elapsed().as_secs_f64();
-    let results = results.lock().unwrap();
-    print_results(
-        &format!(
-            "Real-time pipeline ({elapsed:.2}s for {audio_duration_s:.0}s audio, {} segments)",
-            results.len()
-        ),
-        &results,
-    );
+    async fn process_frame(
+        &mut self,
+        envelope: FrameEnvelope,
+        direction: Direction,
+        ctx: &ProcessorContext,
+    ) -> Result<()> {
+        if let Frame::InputAudioRaw(ref audio) = envelope.frame {
+            let out = FrameEnvelope::new(Frame::OutputAudioRaw(audio.clone()));
+            ctx.push_frame(out, direction).await?;
+        }
+        ctx.push_frame(envelope, direction).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,8 +274,6 @@ async fn run_realtime_inner(audio_file: &Path, whisper_ctx: Arc<WhisperContext>,
 // ---------------------------------------------------------------------------
 
 fn main() {
-    // Redirect whisper.cpp C library logging through Rust's `log` crate.
-    // With no log subscriber registered, all C output is silently dropped.
     whisper_rs::install_logging_hooks();
 
     let args = parse_args();
@@ -460,13 +293,83 @@ fn main() {
     );
     eprintln!("Model loaded.\n");
 
-    match args.mode {
-        Mode::Fast => {
-            let pcm = wav_to_pcm(&args.audio_file);
-            run_fast(&pcm, &whisper_ctx, &args.language);
+    let pacing = if args.play || args.mode == Mode::Realtime {
+        if args.play && args.mode == Mode::Fast {
+            eprintln!("Note: --play forces real-time pacing");
         }
-        Mode::Realtime => {
-            run_realtime(&args.audio_file, whisper_ctx, &args.language);
-        }
+        AudioPacing::RealTime
+    } else {
+        AudioPacing::AsFastAsPossible
+    };
+
+    let segment_count = Arc::new(AtomicUsize::new(0));
+    let start = Instant::now();
+
+    let wav_data = std::fs::read(&args.audio_file).unwrap_or_else(|e| {
+        eprintln!("Failed to read {}: {e}", args.audio_file.display());
+        std::process::exit(1);
+    });
+
+    let in_params = TransportParams {
+        audio_in_enabled: true,
+        ..Default::default()
+    };
+    let input_transport =
+        LocalAudioInputTransport::new(in_params, AudioInputSource::Buffer(Bytes::from(wav_data)))
+            .with_format(AudioFormat::Wav)
+            .with_pacing(pacing);
+
+    let vad_processor = VadProcessor::new(VadController::with_params(
+        SileroVadAnalyzer::new(16000).expect("failed to create VAD"),
+        16000,
+        VadParams {
+            min_volume: 0.0,
+            ..Default::default()
+        },
+    ));
+
+    let whisper_processor =
+        WhisperTranscribeProcessor::new(whisper_ctx, args.language.clone(), segment_count.clone());
+
+    let mut processors: Vec<Box<dyn FrameProcessor>> =
+        vec![Box::new(input_transport), Box::new(vad_processor)];
+
+    // When playing audio, insert the converter and output transport BEFORE
+    // whisper so that audio flows to the speakers without being blocked by
+    // whisper inference stalls.
+    if args.play {
+        processors.push(Box::new(InputToOutputAudio::new()));
+
+        let out_params = TransportParams {
+            audio_out_enabled: true,
+            audio_out_sample_rate: Some(16000),
+            ..Default::default()
+        };
+        let output_transport = LocalAudioOutputTransport::new(
+            out_params,
+            AudioOutputSink::Device(DeviceConfig::default()),
+        );
+        processors.push(Box::new(output_transport));
     }
+
+    processors.push(Box::new(whisper_processor));
+
+    let pipeline = Pipeline::new(processors);
+
+    let mut task = PipelineTask::new(
+        Box::new(pipeline),
+        PipelineParams {
+            audio_in_sample_rate: 16000,
+            idle_timeout: None,
+            ..Default::default()
+        },
+    );
+
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async { task.run().await.unwrap() });
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let count = segment_count.load(Ordering::Relaxed);
+    eprintln!("\n{count} segments in {elapsed:.2}s");
 }

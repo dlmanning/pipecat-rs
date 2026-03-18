@@ -12,12 +12,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use pipecat_audio::vad::{SileroVadAnalyzer, VadAnalyzerBase, VadController, VadControllerEvent};
+use pipecat_audio::vad::{SileroVadAnalyzer, VadController, VadProcessor};
 use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorParams};
 use pipecat_core::VadParams;
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
-use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
+use pipecat_core::processor::{FrameProcessor, ProcessorContext};
 use pipecat_core::test_utils::*;
 use pipecat_integration_tests::mock_services::*;
 use pipecat_pipeline::Pipeline;
@@ -34,119 +34,15 @@ use tokio::time::timeout;
 /// 60s of real speech at 16 kHz mono 16-bit PCM WAV (from Silero VAD test suite).
 const TEST_SPEECH_WAV: &[u8] = include_bytes!("../fixtures/test.wav");
 
-/// Silero at 16 kHz requires 512 samples per VAD chunk = 1024 bytes of int16 PCM.
-const VAD_CHUNK_BYTES: usize = 512 * 2;
-
-// ---------------------------------------------------------------------------
-// VadBridgeProcessor: wraps real Silero VAD and emits VAD frames
-// ---------------------------------------------------------------------------
-
-/// Test-only processor that wraps a real `VadController<SileroVadAnalyzer>`.
-///
-/// Converts `InputAudioRaw` frames into `VADUserStartedSpeaking`,
-/// `VADUserStoppedSpeaking`, and `UserSpeaking` frames — mimicking what
-/// the input transport does in production.
-///
-/// Buffers incoming audio to produce VAD-chunk-sized blocks, since the
-/// transport may chunk at a different size (e.g. 20ms = 640 bytes) than
-/// what Silero requires (512 samples = 1024 bytes).
-#[derive(Debug)]
-struct VadBridgeProcessor {
-    base: ProcessorBase,
-    controller: Option<VadController<SileroVadAnalyzer>>,
-    audio_buf: Vec<u8>,
-}
-
-impl VadBridgeProcessor {
-    fn new() -> Self {
-        Self {
-            base: ProcessorBase::new("VadBridge"),
-            controller: None,
-            audio_buf: Vec::new(),
-        }
-    }
-
-    async fn drain_vad_chunks(&mut self, ctx: &ProcessorContext) -> Result<()> {
-        let controller = self.controller.as_mut().unwrap();
-        while self.audio_buf.len() >= VAD_CHUNK_BYTES {
-            let chunk: Vec<u8> = self.audio_buf.drain(..VAD_CHUNK_BYTES).collect();
-            let events = controller.handle_audio(&chunk);
-            for event in &events {
-                match event {
-                    VadControllerEvent::SpeechStarted => {
-                        let params = controller.analyzer().params();
-                        ctx.send_downstream(Frame::VADUserStartedSpeaking(
-                            VADUserStartedSpeakingFrame {
-                                start_secs: params.start_secs,
-                                timestamp: 0.0,
-                            },
-                        ))
-                        .await?;
-                    }
-                    VadControllerEvent::SpeechStopped => {
-                        let params = controller.analyzer().params();
-                        ctx.send_downstream(Frame::VADUserStoppedSpeaking(
-                            VADUserStoppedSpeakingFrame {
-                                stop_secs: params.stop_secs,
-                                timestamp: 0.0,
-                            },
-                        ))
-                        .await?;
-                    }
-                    VadControllerEvent::SpeechActivity => {
-                        ctx.send_downstream(Frame::UserSpeaking(UserSpeakingFrame))
-                            .await?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl FrameProcessor for VadBridgeProcessor {
-    fn name(&self) -> &str {
-        self.base.name()
-    }
-    fn id(&self) -> u64 {
-        self.base.id()
-    }
-
-    async fn process_frame(
-        &mut self,
-        envelope: FrameEnvelope,
-        direction: Direction,
-        ctx: &ProcessorContext,
-    ) -> Result<()> {
-        match &envelope.frame {
-            Frame::Start(_) => {
-                let analyzer =
-                    SileroVadAnalyzer::new(16000).expect("failed to create Silero VAD analyzer");
-                let params = VadParams {
-                    min_volume: 0.0, // disable volume gating for test audio
-                    ..Default::default()
-                };
-                let base = VadAnalyzerBase::new(analyzer, Some(16000), Some(params));
-                let mut controller = VadController::new(base);
-                controller.handle_start(16000);
-                self.controller = Some(controller);
-                ctx.push_frame(envelope, direction).await?;
-            }
-
-            Frame::InputAudioRaw(audio_frame) => {
-                self.audio_buf.extend_from_slice(&audio_frame.audio);
-                self.drain_vad_chunks(ctx).await?;
-                // Forward all audio downstream — matching real transport behavior.
-                ctx.push_frame(envelope, direction).await?;
-            }
-
-            _ => {
-                ctx.push_frame(envelope, direction).await?;
-            }
-        }
-        Ok(())
-    }
+fn make_vad_processor() -> VadProcessor<SileroVadAnalyzer> {
+    VadProcessor::new(VadController::with_params(
+        SileroVadAnalyzer::new(16000).expect("failed to create Silero VAD analyzer"),
+        16000,
+        VadParams {
+            min_volume: 0.0,
+            ..Default::default()
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +128,7 @@ impl FrameProcessor for VadGatedSTT {
         ctx: &ProcessorContext,
     ) -> Result<()> {
         // Reset per-segment state when a new speech segment starts.
-        // Only reset on the original VAD event going downstream (from VadBridge),
+        // Only reset on the original VAD event going downstream (from VadProcessor),
         // NOT on UserStartedSpeaking which the UserAggregator broadcasts back
         // upstream — that's a derived event from the same speech start.
         if direction == Direction::Downstream
@@ -306,7 +202,7 @@ async fn single_turn_real_vad_full_pipeline() {
 
     let pipeline = Pipeline::new(vec![
         Box::new(input_transport),
-        Box::new(VadBridgeProcessor::new()),
+        Box::new(make_vad_processor()),
         Box::new(VadGatedSTT::new(vec!["hello from real vad"], 1)),
         user_agg,
         Box::new(FakeLLMService::new(vec!["I heard you!".to_string()])),
@@ -408,7 +304,7 @@ async fn two_turns_real_vad_context_accumulation() {
 
     let pipeline = Pipeline::new(vec![
         Box::new(input_transport),
-        Box::new(VadBridgeProcessor::new()),
+        Box::new(make_vad_processor()),
         Box::new(VadGatedSTT::new(vec!["hello", "goodbye"], 1)),
         user_agg,
         Box::new(FakeLLMService::new(vec!["Got it.".to_string()])),
@@ -478,62 +374,9 @@ async fn two_turns_real_vad_context_accumulation() {
 }
 
 // ===========================================================================
-// VAD pre-scan helpers
+// VAD helpers
 // ===========================================================================
 
-/// A speech segment found by running the VAD at full speed.
-struct SpeechSegment {
-    /// Byte offset into the PCM data where speech starts.
-    start_byte: usize,
-    /// Byte offset into the PCM data where speech ends.
-    end_byte: usize,
-}
-
-/// Run the VAD at max speed over raw PCM, returning speech segment byte ranges.
-fn prescan_vad(pcm: &[u8]) -> Vec<SpeechSegment> {
-    let analyzer = SileroVadAnalyzer::new(16000).expect("failed to create Silero VAD analyzer");
-    let params = VadParams {
-        min_volume: 0.0,
-        ..Default::default()
-    };
-    let base = VadAnalyzerBase::new(analyzer, Some(16000), Some(params));
-    let mut controller = VadController::new(base);
-    controller.handle_start(16000);
-
-    let mut segments = Vec::new();
-    let mut current_start: Option<usize> = None;
-
-    for (i, chunk) in pcm.chunks_exact(VAD_CHUNK_BYTES).enumerate() {
-        let byte_offset = i * VAD_CHUNK_BYTES;
-        let events = controller.handle_audio(chunk);
-        for event in &events {
-            match event {
-                VadControllerEvent::SpeechStarted => {
-                    current_start = Some(byte_offset);
-                }
-                VadControllerEvent::SpeechStopped => {
-                    if let Some(start) = current_start.take() {
-                        segments.push(SpeechSegment {
-                            start_byte: start,
-                            end_byte: byte_offset + VAD_CHUNK_BYTES,
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    // Close any open segment at end of file.
-    if let Some(start) = current_start {
-        segments.push(SpeechSegment {
-            start_byte: start,
-            end_byte: pcm.len(),
-        });
-    }
-    segments
-}
-
-/// Decode WAV bytes to raw PCM.
 fn wav_to_pcm(wav: &[u8]) -> Vec<u8> {
     let reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
     reader
@@ -543,18 +386,31 @@ fn wav_to_pcm(wav: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+fn make_controller() -> VadController<SileroVadAnalyzer> {
+    VadController::with_params(
+        SileroVadAnalyzer::new(16000).expect("failed to create Silero VAD analyzer"),
+        16000,
+        VadParams {
+            min_volume: 0.0,
+            ..Default::default()
+        },
+    )
+}
+
 // ===========================================================================
 // Test 3: Pre-scanned VAD → fast pipeline test (no real-time pacing)
 // ===========================================================================
 
 /// Pre-scans the 60s WAV with the VAD at full speed, then replays each speech
 /// segment into the pipeline as pre-determined VAD events + audio chunks.
-/// No VadBridge processor needed — the test injects VAD frames directly.
+/// No VadProcessor needed — the test injects VAD frames directly.
 /// Runs as fast as the pipeline can process, not at real-time.
 #[tokio::test]
 async fn prescanned_vad_fast_pipeline() {
     let pcm = wav_to_pcm(TEST_SPEECH_WAV);
-    let segments = prescan_vad(&pcm);
+    let mut controller = make_controller();
+    let segments = controller.scan_segments(&pcm);
+    let chunk_size = controller.analyzer().chunk_size();
 
     assert!(
         segments.len() >= 2,
@@ -577,7 +433,7 @@ async fn prescanned_vad_fast_pipeline() {
     let pair = LLMContextAggregatorPair::new(context, params);
     let (user_agg, assistant_agg) = pair.into_processors();
 
-    // Pipeline without VadBridge — we inject VAD events directly.
+    // Pipeline without VadProcessor — we inject VAD events directly.
     let stt = VadGatedSTT::new(vec!["turn one", "turn two"], 1);
     let pipeline = Pipeline::new(vec![
         Box::new(stt),
@@ -614,7 +470,7 @@ async fn prescanned_vad_fast_pipeline() {
         .await;
 
         // Send the speech audio in VAD-chunk-sized frames.
-        for chunk in audio_data.chunks(VAD_CHUNK_BYTES) {
+        for chunk in audio_data.chunks(chunk_size) {
             send_frame(
                 &handle,
                 Frame::InputAudioRaw(AudioRawFrame {
@@ -682,7 +538,9 @@ async fn prescanned_vad_whisper_pipeline() {
     use pipecat_services::whisper::model::ensure_model;
 
     let pcm = wav_to_pcm(TEST_SPEECH_WAV);
-    let segments = prescan_vad(&pcm);
+    let mut controller = make_controller();
+    let segments = controller.scan_segments(&pcm);
+    let chunk_size = controller.analyzer().chunk_size();
 
     assert!(
         segments.len() >= 2,
@@ -753,7 +611,7 @@ async fn prescanned_vad_whisper_pipeline() {
         )
         .await;
 
-        for chunk in audio_data.chunks(VAD_CHUNK_BYTES) {
+        for chunk in audio_data.chunks(chunk_size) {
             send_frame(
                 &handle,
                 Frame::InputAudioRaw(AudioRawFrame {
@@ -833,7 +691,9 @@ async fn whisper_full_transcript_fast() {
     use pipecat_services::whisper::model::ensure_model;
 
     let pcm = wav_to_pcm(TEST_SPEECH_WAV);
-    let segments = prescan_vad(&pcm);
+    let mut controller = make_controller();
+    let segments = controller.scan_segments(&pcm);
+    let chunk_size = controller.analyzer().chunk_size();
 
     let home = std::env::var("HOME").expect("HOME not set");
     let cache_dir = PathBuf::from(home).join(".cache/pipecat-rs/whisper");
@@ -880,7 +740,7 @@ async fn whisper_full_transcript_fast() {
         )
         .await;
 
-        for chunk in audio_data.chunks(VAD_CHUNK_BYTES) {
+        for chunk in audio_data.chunks(chunk_size) {
             send_frame(
                 &handle,
                 Frame::InputAudioRaw(AudioRawFrame {
@@ -952,7 +812,7 @@ async fn whisper_full_transcript_fast() {
 // ===========================================================================
 
 /// Feeds the 60s WAV through the LocalTransport at real-time pace with a
-/// real VadBridge and Whisper STT. Prints the full transcript as it would
+/// VadProcessor and Whisper STT. Prints the full transcript as it would
 /// be produced in a live session.
 #[cfg(feature = "whisper")]
 #[tokio::test]
@@ -990,7 +850,7 @@ async fn whisper_full_transcript_realtime() {
 
     let pipeline = Pipeline::new(vec![
         Box::new(input_transport),
-        Box::new(VadBridgeProcessor::new()),
+        Box::new(make_vad_processor()),
         Box::new(whisper_stt),
     ]);
 
