@@ -38,6 +38,19 @@ fn make_controller() -> VadController<SileroVadAnalyzer> {
     )
 }
 
+/// Extract raw PCM data from a WAV file by finding the "data" chunk.
+fn wav_to_pcm(wav: &[u8]) -> Vec<u8> {
+    let mut i = 12; // skip RIFF header
+    while i + 8 <= wav.len() {
+        let chunk_size = u32::from_le_bytes(wav[i + 4..i + 8].try_into().unwrap()) as usize;
+        if &wav[i..i + 4] == b"data" {
+            return wav[i + 8..i + 8 + chunk_size].to_vec();
+        }
+        i += 8 + chunk_size;
+    }
+    panic!("no data chunk found in WAV");
+}
+
 // ---------------------------------------------------------------------------
 // Full-stack VadController tests with real speech audio
 // ---------------------------------------------------------------------------
@@ -123,12 +136,7 @@ fn controller_stays_quiet_on_silence() {
 
 #[test]
 fn full_60s_wav_speech_segments() {
-    let reader = hound::WavReader::new(std::io::Cursor::new(TEST_SPEECH_WAV)).unwrap();
-    let pcm_bytes: Vec<u8> = reader
-        .into_samples::<i16>()
-        .map(|s| s.unwrap())
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    let pcm_bytes = wav_to_pcm(TEST_SPEECH_WAV);
 
     let mut controller = make_controller();
     let chunk_size = controller.analyzer().chunk_size();
@@ -189,12 +197,7 @@ fn whisper_transcribe_vad_segments() {
     use pipecat_services::whisper::model::ensure_model;
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-    let reader = hound::WavReader::new(std::io::Cursor::new(TEST_SPEECH_WAV)).unwrap();
-    let pcm: Vec<u8> = reader
-        .into_samples::<i16>()
-        .map(|s| s.unwrap())
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    let pcm = wav_to_pcm(TEST_SPEECH_WAV);
 
     let mut controller = make_controller();
     let segments = controller.scan_segments(&pcm);
@@ -268,12 +271,7 @@ async fn full_60s_wav_speech_segments_realtime_pacing() {
     use pipecat_transport::TransportParams;
     use pipecat_transport::local::*;
 
-    let reader = hound::WavReader::new(std::io::Cursor::new(TEST_SPEECH_WAV)).unwrap();
-    let pcm_bytes: Vec<u8> = reader
-        .into_samples::<i16>()
-        .map(|s| s.unwrap())
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    let pcm_bytes = wav_to_pcm(TEST_SPEECH_WAV);
 
     // Run the same VAD at max speed to get the ground truth count.
     let mut fast_controller = make_controller();
@@ -299,7 +297,7 @@ async fn full_60s_wav_speech_segments_realtime_pacing() {
         in_params,
         AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
     )
-    .with_format(AudioFormat::Wav)
+    .with_format(AudioFormat::Encoded)
     .with_pacing(AudioPacing::RealTime);
 
     // VadProcessor handles all the VAD logic — no manual chunking needed.

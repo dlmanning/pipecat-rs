@@ -8,8 +8,8 @@ use pipecat_audio::resampler::AudioResampler;
 /// Configuration for input and output transports.
 ///
 /// Audio and video parameters control what media the transport processes.
-/// Trait-object fields (`audio_in_filter`, `audio_out_mixer`, `audio_out_resampler`)
-/// are optional hooks for concrete implementations.
+/// Trait-object fields (`audio_in_filter`, `audio_in_resampler`, `audio_out_mixer`,
+/// `audio_out_resampler`) are optional hooks for concrete implementations.
 pub struct TransportParams {
     // -- Audio input --
     pub audio_in_enabled: bool,
@@ -17,6 +17,7 @@ pub struct TransportParams {
     pub audio_in_sample_rate: Option<u32>,
     pub audio_in_channels: u16,
     pub audio_in_filter: Option<Box<dyn AudioFilter>>,
+    pub audio_in_resampler: Option<Box<dyn AudioResampler>>,
     /// Start streaming audio immediately when the transport starts.
     pub audio_in_stream_on_start: bool,
     /// Pass input audio downstream through the pipeline.
@@ -65,6 +66,7 @@ impl Default for TransportParams {
             audio_in_sample_rate: None,
             audio_in_channels: 1,
             audio_in_filter: None,
+            audio_in_resampler: None,
             audio_in_stream_on_start: true,
             audio_in_passthrough: true,
 
@@ -101,6 +103,7 @@ impl fmt::Debug for TransportParams {
             .field("audio_in_sample_rate", &self.audio_in_sample_rate)
             .field("audio_in_channels", &self.audio_in_channels)
             .field("audio_in_filter", &self.audio_in_filter.is_some())
+            .field("audio_in_resampler", &self.audio_in_resampler.is_some())
             .field("audio_in_stream_on_start", &self.audio_in_stream_on_start)
             .field("audio_in_passthrough", &self.audio_in_passthrough)
             .field("audio_out_enabled", &self.audio_out_enabled)
@@ -147,6 +150,7 @@ mod tests {
         assert!(p.audio_in_passthrough);
         assert!(p.audio_in_stream_on_start);
         assert!(p.audio_in_filter.is_none());
+        assert!(p.audio_in_resampler.is_none());
         assert!(p.audio_out_mixer.is_none());
         assert!(p.audio_out_mixer_map.is_empty());
         assert!(p.audio_out_resampler.is_none());

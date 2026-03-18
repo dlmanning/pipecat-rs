@@ -6,7 +6,7 @@ Base transport layer for pipecat-rs. Provides abstract input and output transpor
 
 - **`BaseInputTransport`** — Processor that receives audio/video from an external source and pushes frames into the pipeline. Supports pause/resume, configurable audio filtering, and respects `TransportParams` for enabling/disabling audio/video channels.
 - **`BaseOutputTransport`** — Processor that receives frames from the pipeline and sends them to an external sink via async callbacks. Handles audio/video output and transport lifecycle events (connected, disconnected, transmit).
-- **`LocalAudioInputTransport`** — Reads audio from a buffer, file (raw PCM or WAV), or channel and feeds it into the pipeline. Supports real-time pacing.
+- **`LocalAudioInputTransport`** — Reads audio from a buffer, file, or channel and feeds it into the pipeline. Supports raw PCM and multi-format decoding (WAV, MP3, FLAC, OGG/Vorbis, AAC via symphonia). Supports real-time pacing.
 - **`LocalAudioOutputTransport`** — Writes pipeline audio to a buffer, file, or discard sink. Useful for tests and offline processing.
 - **`AudioPlayer`** — Standalone `FrameProcessor` that plays `InputAudioRaw` frames through a system audio device via cpal. Handles resampling and channel mapping to the device's native format. Requires the `cpal` feature.
 - **`TransportParams`** — Configuration for audio/video enable flags, sample rate, channel count, and optional audio filters.
@@ -14,6 +14,8 @@ Base transport layer for pipecat-rs. Provides abstract input and output transpor
 ## Features
 
 - **`cpal`** — Enables `AudioPlayer` for system audio device playback via the [cpal](https://crates.io/crates/cpal) crate.
+
+Multi-format audio decoding (WAV, MP3, FLAC, OGG/Vorbis, AAC) is always available via [symphonia](https://crates.io/crates/symphonia). Use `AudioFormat::Encoded` for auto-detection of any supported format.
 
 ## Architecture
 

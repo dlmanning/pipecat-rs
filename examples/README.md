@@ -2,11 +2,14 @@
 
 ## transcribe
 
-Transcribe a WAV file using Silero VAD + local Whisper STT. Demonstrates building a pipeline with `PipelineTask`, `LocalAudioInputTransport`, `VadProcessor`, and a custom `WhisperTranscribeProcessor`.
+Transcribe an audio file using Silero VAD + local Whisper STT. Supports WAV, MP3, FLAC, OGG/Vorbis, AAC, and more via symphonia. Demonstrates building a pipeline with `PipelineTask`, `LocalAudioInputTransport`, `VadProcessor`, and a custom `WhisperTranscribeProcessor`.
 
 ```bash
 # Transcribe as fast as possible (default)
 cargo run -p pipecat-examples --bin transcribe -- audio.wav
+
+# Transcribe an MP3 file
+cargo run -p pipecat-examples --bin transcribe -- recording.mp3
 
 # Transcribe at real-time pace
 cargo run -p pipecat-examples --bin transcribe -- audio.wav --realtime
@@ -23,7 +26,7 @@ The Whisper model (`tiny.en` by default) is downloaded automatically to `~/.cach
 LocalAudioInput → VadProcessor → [AudioPlayer] → WhisperTranscribe
 ```
 
-- **LocalAudioInput** reads the WAV file and feeds 20ms audio chunks into the pipeline
+- **LocalAudioInput** reads the audio file and feeds 20ms audio chunks into the pipeline
 - **VadProcessor** detects speech start/stop using Silero VAD
 - **AudioPlayer** (optional, `--play`) plays audio through the default system output device via cpal
 - **WhisperTranscribe** buffers audio during speech segments and transcribes on speech stop
@@ -36,3 +39,4 @@ LocalAudioInput → VadProcessor → [AudioPlayer] → WhisperTranscribe
 | `--play`            | Play audio through speakers (implies `--realtime`)             |
 | `--model <name>`    | Whisper GGML model name (default: `tiny.en`)                   |
 | `--language <code>` | Language code (default: `en`)                                  |
+| `--stop-secs <f64>` | Silence duration before speech stop (default: `0.2`)           |

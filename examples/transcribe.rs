@@ -1,7 +1,9 @@
-//! Transcribe a WAV file using Silero VAD + Whisper STT.
+//! Transcribe an audio file using Silero VAD + Whisper STT.
+//!
+//! Supports WAV, MP3, FLAC, OGG/Vorbis, AAC, and more via symphonia.
 //!
 //! ```text
-//! cargo run -p pipecat-examples --bin transcribe -- <audio.wav> [--realtime] [--play]
+//! cargo run -p pipecat-examples --bin transcribe -- <audio_file> [--realtime] [--play]
 //! ```
 
 use std::path::PathBuf;
@@ -29,10 +31,10 @@ const PRE_SPEECH_BYTES: usize = 16000 * 2;
 // CLI
 // ---------------------------------------------------------------------------
 
-/// Transcribe a WAV file using Silero VAD + Whisper STT.
+/// Transcribe an audio file using Silero VAD + Whisper STT.
 #[derive(Parser)]
 struct Args {
-    /// WAV file to transcribe
+    /// Audio file to transcribe (WAV, MP3, FLAC, OGG, AAC, etc.)
     audio_file: PathBuf,
 
     /// Process audio at real-time pace (default: as fast as possible)
@@ -50,6 +52,10 @@ struct Args {
     /// Language code
     #[arg(long, default_value = "en")]
     language: String,
+
+    /// Seconds of silence before speech is considered stopped (default: 0.2)
+    #[arg(long, default_value = "0.2")]
+    stop_secs: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,18 +225,19 @@ fn main() {
     let segment_count = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
 
-    let wav_data = std::fs::read(&args.audio_file).unwrap_or_else(|e| {
+    let audio_data = std::fs::read(&args.audio_file).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {e}", args.audio_file.display());
         std::process::exit(1);
     });
 
     let in_params = TransportParams {
         audio_in_enabled: true,
+        audio_in_resampler: Some(Box::new(pipecat_audio::resampler::LinearResampler::new())),
         ..Default::default()
     };
     let input_transport =
-        LocalAudioInputTransport::new(in_params, AudioInputSource::Buffer(Bytes::from(wav_data)))
-            .with_format(AudioFormat::Wav)
+        LocalAudioInputTransport::new(in_params, AudioInputSource::Buffer(Bytes::from(audio_data)))
+            .with_format(AudioFormat::Encoded)
             .with_pacing(pacing);
 
     let vad_processor = VadProcessor::new(VadController::with_params(
@@ -238,6 +245,7 @@ fn main() {
         16000,
         VadParams {
             min_volume: 0.0,
+            stop_secs: args.stop_secs,
             ..Default::default()
         },
     ));

@@ -24,8 +24,9 @@ pub enum AudioFormat {
     /// Raw PCM: signed 16-bit little-endian interleaved samples.
     #[default]
     RawPcm,
-    /// WAV container (PCM16 only).
-    Wav,
+    /// Auto-detect format via symphonia.
+    /// Supports WAV, MP3, FLAC, OGG/Vorbis, AAC, and more.
+    Encoded,
 }
 
 /// Source of audio data for the local input transport.
@@ -43,7 +44,7 @@ pub enum AudioInputSource {
 pub enum AudioOutputSink {
     /// Collect raw PCM bytes for assertions.
     Buffer(Arc<StdMutex<Vec<u8>>>),
-    /// Write to a file on disk (format determined by `AudioFormat`).
+    /// Write raw PCM to a file on disk.
     File(PathBuf),
     /// Discard all output audio.
     Discard,
@@ -145,30 +146,19 @@ impl LocalAudioInputTransport {
                         tracing::error!("LocalAudioInput: failed to read file {:?}: {}", path, e);
                     }
                 },
-                (AudioInputSource::Buffer(data), AudioFormat::Wav) => {
-                    match hound::WavReader::new(std::io::Cursor::new(data.as_ref())) {
-                        Ok(reader) => {
-                            if let Some((pcm, wav_sr, wav_ch)) = read_wav_to_pcm(reader) {
-                                let chunk_bytes = compute_chunk_bytes(wav_sr, wav_ch);
-                                feed_chunks(&tx, &pcm, chunk_bytes, wav_sr, wav_ch, realtime).await;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("LocalAudioInput: failed to parse WAV buffer: {}", e);
-                        }
-                    }
+
+                (AudioInputSource::Buffer(data), AudioFormat::Encoded) => {
+                    let cursor = std::io::Cursor::new(data.to_vec());
+                    decode_and_feed(Box::new(cursor), &tx, realtime).await;
                 }
-                (AudioInputSource::File(path), AudioFormat::Wav) => {
-                    match hound::WavReader::open(&path) {
-                        Ok(reader) => {
-                            if let Some((pcm, wav_sr, wav_ch)) = read_wav_to_pcm(reader) {
-                                let chunk_bytes = compute_chunk_bytes(wav_sr, wav_ch);
-                                feed_chunks(&tx, &pcm, chunk_bytes, wav_sr, wav_ch, realtime).await;
-                            }
+                (AudioInputSource::File(path), AudioFormat::Encoded) => {
+                    match std::fs::File::open(&path) {
+                        Ok(file) => {
+                            decode_and_feed(Box::new(file), &tx, realtime).await;
                         }
                         Err(e) => {
                             tracing::error!(
-                                "LocalAudioInput: failed to open WAV file {:?}: {}",
+                                "LocalAudioInput: failed to open file {:?}: {}",
                                 path,
                                 e
                             );
@@ -248,31 +238,137 @@ async fn feed_chunks(
     }
 }
 
-/// Read a WAV file/buffer and return `(pcm_bytes, sample_rate, num_channels)`.
-/// Returns `None` if the format is not PCM16.
-fn read_wav_to_pcm(reader: hound::WavReader<impl std::io::Read>) -> Option<(Vec<u8>, u32, u16)> {
-    let spec = reader.spec();
-    if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
+/// Decode audio from any supported format and stream 20ms chunks through the sender.
+/// Decodes incrementally so playback starts immediately without buffering the entire file.
+async fn decode_and_feed(
+    source: Box<dyn symphonia::core::io::MediaSource>,
+    tx: &mpsc::Sender<AudioRawFrame>,
+    realtime: bool,
+) {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    let mss = MediaSourceStream::new(source, Default::default());
+    let hint = Hint::new();
+
+    let probed = match symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(probed) => probed,
+        Err(e) => {
+            tracing::error!("LocalAudioInput: failed to probe audio format: {}", e);
+            return;
+        }
+    };
+
+    let mut format_reader = probed.format;
+    let track = match format_reader.default_track() {
+        Some(track) => track,
+        None => {
+            tracing::error!("LocalAudioInput: no audio track found");
+            return;
+        }
+    };
+
+    let track_id = track.id;
+    let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let num_channels = track.codec_params.channels.map_or(0, |c| c.count()) as u16;
+
+    if sample_rate == 0 || num_channels == 0 {
         tracing::error!(
-            "LocalAudioInput: WAV must be PCM16, got {:?} {}bit",
-            spec.sample_format,
-            spec.bits_per_sample
+            "LocalAudioInput: invalid audio params: sr={}, ch={}",
+            sample_rate,
+            num_channels
         );
-        return None;
+        return;
     }
-    let sample_rate = spec.sample_rate;
-    let num_channels = spec.channels;
-    let mut pcm_bytes = Vec::new();
-    for sample in reader.into_samples::<i16>() {
-        match sample {
-            Ok(s) => pcm_bytes.extend_from_slice(&s.to_le_bytes()),
+
+    let mut decoder = match symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+    {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            tracing::error!("LocalAudioInput: failed to create decoder: {}", e);
+            return;
+        }
+    };
+
+    let chunk_bytes = compute_chunk_bytes(sample_rate, num_channels);
+    let mut buffer = Vec::new();
+    let mut interval =
+        realtime.then(|| tokio::time::interval(std::time::Duration::from_millis(20)));
+
+    loop {
+        let packet = match format_reader.next_packet() {
+            Ok(packet) => packet,
+            Err(symphonia::core::errors::Error::IoError(ref e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
             Err(e) => {
-                tracing::error!("LocalAudioInput: WAV sample read error: {}", e);
-                return None;
+                tracing::error!("LocalAudioInput: error reading packet: {}", e);
+                break;
+            }
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                tracing::warn!("LocalAudioInput: decode error (skipping packet): {}", e);
+                continue;
+            }
+        };
+
+        let spec = *decoded.spec();
+        let duration = decoded.capacity();
+        let mut sample_buf = SampleBuffer::<i16>::new(duration as u64, spec);
+        sample_buf.copy_interleaved_ref(decoded);
+
+        for &sample in sample_buf.samples() {
+            buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        // Send complete 20ms chunks as they become available.
+        while buffer.len() >= chunk_bytes {
+            if let Some(ref mut iv) = interval {
+                iv.tick().await;
+            }
+            let chunk: Vec<u8> = buffer.drain(..chunk_bytes).collect();
+            let frame = AudioRawFrame {
+                audio: Bytes::from(chunk),
+                sample_rate,
+                num_channels,
+            };
+            if tx.send(frame).await.is_err() {
+                return;
             }
         }
     }
-    Some((pcm_bytes, sample_rate, num_channels))
+
+    // Send any remaining samples as a final (possibly short) chunk.
+    if !buffer.is_empty() {
+        if let Some(ref mut iv) = interval {
+            iv.tick().await;
+        }
+        let frame = AudioRawFrame {
+            audio: Bytes::from(buffer),
+            sample_rate,
+            num_channels,
+        };
+        tx.send(frame).await.ok();
+    }
 }
 
 /// Cancel the source task if it's running.
@@ -331,18 +427,7 @@ impl FrameProcessor for LocalAudioInputTransport {
 enum ResolvedSink {
     Buffer(Arc<StdMutex<Vec<u8>>>),
     File(StdMutex<std::io::BufWriter<std::fs::File>>),
-    WavFile(StdMutex<WavSinkState>),
     Discard,
-}
-
-/// State machine for lazy WAV writer initialization and finalization.
-enum WavSinkState {
-    /// Waiting for the first audio frame to determine sample_rate/channels.
-    Pending(PathBuf),
-    /// Writer is active.
-    Active(hound::WavWriter<std::io::BufWriter<std::fs::File>>),
-    /// Writer has been finalized.
-    Finalized,
 }
 
 /// Callbacks for the local output transport that write audio to a sink.
@@ -351,35 +436,19 @@ struct LocalOutputCallbacks {
 }
 
 impl LocalOutputCallbacks {
-    fn new(sink: AudioOutputSink, format: AudioFormat) -> std::io::Result<Self> {
-        let resolved = match (sink, format) {
-            (AudioOutputSink::Buffer(buf), _) => ResolvedSink::Buffer(buf),
-            (AudioOutputSink::File(path), AudioFormat::RawPcm) => {
+    fn new(sink: AudioOutputSink) -> std::io::Result<Self> {
+        let resolved = match sink {
+            AudioOutputSink::Buffer(buf) => ResolvedSink::Buffer(buf),
+            AudioOutputSink::File(path) => {
                 let file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)?;
                 ResolvedSink::File(StdMutex::new(std::io::BufWriter::new(file)))
             }
-            (AudioOutputSink::File(path), AudioFormat::Wav) => {
-                ResolvedSink::WavFile(StdMutex::new(WavSinkState::Pending(path)))
-            }
-            (AudioOutputSink::Discard, _) => ResolvedSink::Discard,
+            AudioOutputSink::Discard => ResolvedSink::Discard,
         };
         Ok(Self { sink: resolved })
-    }
-
-    /// Finalize the WAV writer if active. Called on End/Cancel.
-    fn finalize(&self) {
-        if let ResolvedSink::WavFile(state) = &self.sink {
-            let mut state = state.lock().unwrap();
-            let old = std::mem::replace(&mut *state, WavSinkState::Finalized);
-            if let WavSinkState::Active(writer) = old
-                && let Err(e) = writer.finalize()
-            {
-                tracing::error!("LocalAudioOutput: WAV finalize error: {}", e);
-            }
-        }
     }
 }
 
@@ -400,41 +469,6 @@ impl OutputTransportCallbacks for LocalOutputCallbacks {
                 }
                 true
             }
-            ResolvedSink::WavFile(state) => {
-                let mut state = state.lock().unwrap();
-                // Lazy-init writer from first frame's params.
-                if matches!(&*state, WavSinkState::Pending(_)) {
-                    let old = std::mem::replace(&mut *state, WavSinkState::Finalized);
-                    if let WavSinkState::Pending(path) = old {
-                        let spec = hound::WavSpec {
-                            channels: frame.num_channels,
-                            sample_rate: frame.sample_rate,
-                            bits_per_sample: 16,
-                            sample_format: hound::SampleFormat::Int,
-                        };
-                        match hound::WavWriter::create(&path, spec) {
-                            Ok(writer) => *state = WavSinkState::Active(writer),
-                            Err(e) => {
-                                tracing::error!(
-                                    "LocalAudioOutput: failed to create WAV file: {}",
-                                    e
-                                );
-                                return false;
-                            }
-                        }
-                    }
-                }
-                if let WavSinkState::Active(writer) = &mut *state {
-                    for sample_bytes in frame.audio.chunks_exact(2) {
-                        let sample = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-                        if let Err(e) = writer.write_sample(sample) {
-                            tracing::error!("LocalAudioOutput: WAV write error: {}", e);
-                            return false;
-                        }
-                    }
-                }
-                true
-            }
             ResolvedSink::Discard => true,
         }
     }
@@ -444,45 +478,29 @@ impl OutputTransportCallbacks for LocalOutputCallbacks {
 // LocalAudioOutputTransport
 // ---------------------------------------------------------------------------
 
-/// Local audio output transport that writes audio to a buffer, file, or discards it.
+/// Local audio output transport that writes raw PCM audio to a buffer, file, or discards it.
 pub struct LocalAudioOutputTransport {
     inner: BaseOutputTransport,
     output_buffer: Option<Arc<StdMutex<Vec<u8>>>>,
-    callbacks: Arc<LocalOutputCallbacks>,
 }
 
 impl LocalAudioOutputTransport {
-    /// Create a new local audio output transport with raw PCM format.
+    /// Create a new local audio output transport.
     ///
     /// # Panics
     ///
     /// Panics if `sink` is `AudioOutputSink::File` and the file cannot be opened.
     pub fn new(params: TransportParams, sink: AudioOutputSink) -> Self {
-        Self::with_format(params, sink, AudioFormat::RawPcm)
-    }
-
-    /// Create a new local audio output transport with the specified format.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `sink` is `AudioOutputSink::File` and the file cannot be opened.
-    pub fn with_format(
-        params: TransportParams,
-        sink: AudioOutputSink,
-        format: AudioFormat,
-    ) -> Self {
         let output_buffer = match &sink {
             AudioOutputSink::Buffer(buf) => Some(buf.clone()),
             _ => None,
         };
         let callbacks = Arc::new(
-            LocalOutputCallbacks::new(sink, format)
-                .expect("LocalAudioOutput: failed to open output sink"),
+            LocalOutputCallbacks::new(sink).expect("LocalAudioOutput: failed to open output sink"),
         );
         Self {
-            inner: BaseOutputTransport::with_name("LocalAudioOutput", params, callbacks.clone()),
+            inner: BaseOutputTransport::with_name("LocalAudioOutput", params, callbacks),
             output_buffer,
-            callbacks,
         }
     }
 
@@ -509,16 +527,12 @@ impl FrameProcessor for LocalAudioOutputTransport {
         ctx: &ProcessorContext,
     ) -> Result<()> {
         let is_start = matches!(&envelope.frame, Frame::Start(_));
-        let is_end = matches!(&envelope.frame, Frame::End(_));
-        let is_cancel = matches!(&envelope.frame, Frame::Cancel(_));
 
         // Delegate to inner transport for all frame handling.
         self.inner.process_frame(envelope, direction, ctx).await?;
 
         if is_start {
             self.inner.set_transport_ready().await;
-        } else if is_end || is_cancel {
-            self.callbacks.finalize();
         }
 
         Ok(())
@@ -573,21 +587,26 @@ mod tests {
 
     /// Create a WAV buffer in memory with the given samples.
     fn make_wav_bytes(samples: &[i16], sample_rate: u32, num_channels: u16) -> Bytes {
-        let spec = hound::WavSpec {
-            channels: num_channels,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        {
-            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
-            for &s in samples {
-                writer.write_sample(s).unwrap();
-            }
-            writer.finalize().unwrap();
-        }
-        Bytes::from(cursor.into_inner())
+        use std::io::Write;
+        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let data_size = pcm.len() as u32;
+        let byte_rate = sample_rate * num_channels as u32 * 2;
+        let block_align = num_channels * 2;
+        let mut buf = Vec::with_capacity(44 + pcm.len());
+        buf.write_all(b"RIFF").unwrap();
+        buf.write_all(&(36 + data_size).to_le_bytes()).unwrap();
+        buf.write_all(b"WAVEfmt ").unwrap();
+        buf.write_all(&16u32.to_le_bytes()).unwrap();
+        buf.write_all(&1u16.to_le_bytes()).unwrap();
+        buf.write_all(&num_channels.to_le_bytes()).unwrap();
+        buf.write_all(&sample_rate.to_le_bytes()).unwrap();
+        buf.write_all(&byte_rate.to_le_bytes()).unwrap();
+        buf.write_all(&block_align.to_le_bytes()).unwrap();
+        buf.write_all(&16u16.to_le_bytes()).unwrap();
+        buf.write_all(b"data").unwrap();
+        buf.write_all(&data_size.to_le_bytes()).unwrap();
+        buf.extend_from_slice(&pcm);
+        Bytes::from(buf)
     }
 
     #[tokio::test]
@@ -799,7 +818,7 @@ mod tests {
 
         let mut transport =
             LocalAudioInputTransport::new(params, AudioInputSource::Buffer(wav_data))
-                .with_format(AudioFormat::Wav);
+                .with_format(AudioFormat::Encoded);
 
         let (down_tx, mut down_rx) = mpsc::channel(64);
         let (up_tx, _up_rx) = mpsc::channel(64);
@@ -848,83 +867,5 @@ mod tests {
             samples.len() * 2,
             "total PCM bytes should match input sample count * 2"
         );
-    }
-
-    #[tokio::test]
-    async fn wav_output_to_file() {
-        let dir = std::env::temp_dir().join("pipecat_test_wav_output");
-        std::fs::create_dir_all(&dir).unwrap();
-        let wav_path = dir.join("test_output.wav");
-        // Clean up from previous runs.
-        let _ = std::fs::remove_file(&wav_path);
-
-        let params = TransportParams {
-            audio_out_enabled: true,
-            ..Default::default()
-        };
-
-        let mut transport = LocalAudioOutputTransport::with_format(
-            params,
-            AudioOutputSink::File(wav_path.clone()),
-            AudioFormat::Wav,
-        );
-
-        let (down_tx, _down_rx) = mpsc::channel(64);
-        let (up_tx, _up_rx) = mpsc::channel(64);
-        let ctx =
-            ProcessorContext::new(down_tx, up_tx, transport.id(), transport.name().to_string());
-
-        transport
-            .process_frame(
-                FrameEnvelope::new(Frame::Start(StartFrame::default())),
-                Direction::Downstream,
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        // Send audio with enough data to fill output chunks.
-        let samples: Vec<i16> = (0..2400).map(|i| (i % 100) as i16).collect();
-        let pcm_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        transport
-            .process_frame(
-                FrameEnvelope::new(Frame::OutputAudioRaw(AudioRawFrame {
-                    audio: Bytes::from(pcm_bytes),
-                    sample_rate: 24000,
-                    num_channels: 1,
-                })),
-                Direction::Downstream,
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        // Give the audio task time to process and write.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Finalize via End frame.
-        transport
-            .process_frame(
-                FrameEnvelope::new(Frame::End(EndFrame::default())),
-                Direction::Downstream,
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        // Read the WAV file back and verify it's valid.
-        let reader = hound::WavReader::open(&wav_path).expect("should be a valid WAV file");
-        let spec = reader.spec();
-        assert_eq!(spec.sample_rate, 24000);
-        assert_eq!(spec.channels, 1);
-        assert_eq!(spec.bits_per_sample, 16);
-        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
-
-        let read_samples: Vec<i16> = reader.into_samples::<i16>().map(|s| s.unwrap()).collect();
-        assert!(!read_samples.is_empty(), "WAV file should contain samples");
-
-        // Clean up.
-        let _ = std::fs::remove_file(&wav_path);
-        let _ = std::fs::remove_dir(&dir);
     }
 }

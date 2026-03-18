@@ -197,7 +197,7 @@ async fn single_turn_real_vad_full_pipeline() {
         in_params,
         AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
     )
-    .with_format(AudioFormat::Wav)
+    .with_format(AudioFormat::Encoded)
     .with_pacing(AudioPacing::RealTime);
 
     let pipeline = Pipeline::new(vec![
@@ -299,7 +299,7 @@ async fn two_turns_real_vad_context_accumulation() {
         in_params,
         AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
     )
-    .with_format(AudioFormat::Wav)
+    .with_format(AudioFormat::Encoded)
     .with_pacing(AudioPacing::RealTime);
 
     let pipeline = Pipeline::new(vec![
@@ -378,12 +378,15 @@ async fn two_turns_real_vad_context_accumulation() {
 // ===========================================================================
 
 fn wav_to_pcm(wav: &[u8]) -> Vec<u8> {
-    let reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
-    reader
-        .into_samples::<i16>()
-        .map(|s| s.unwrap())
-        .flat_map(|s| s.to_le_bytes())
-        .collect()
+    let mut i = 12; // skip RIFF header
+    while i + 8 <= wav.len() {
+        let chunk_size = u32::from_le_bytes(wav[i + 4..i + 8].try_into().unwrap()) as usize;
+        if &wav[i..i + 4] == b"data" {
+            return wav[i + 8..i + 8 + chunk_size].to_vec();
+        }
+        i += 8 + chunk_size;
+    }
+    panic!("no data chunk found in WAV");
 }
 
 fn make_controller() -> VadController<SileroVadAnalyzer> {
@@ -845,7 +848,7 @@ async fn whisper_full_transcript_realtime() {
         in_params,
         AudioInputSource::Buffer(Bytes::from_static(TEST_SPEECH_WAV)),
     )
-    .with_format(AudioFormat::Wav)
+    .with_format(AudioFormat::Encoded)
     .with_pacing(AudioPacing::RealTime);
 
     let pipeline = Pipeline::new(vec![

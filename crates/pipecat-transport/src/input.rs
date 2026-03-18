@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use pipecat_audio::filter::{AudioFilter, FilterControlFrame};
+use pipecat_audio::resampler::AudioResampler;
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
@@ -50,6 +52,8 @@ pub struct BaseInputTransport {
     // Filter wrapped for sharing with the audio task.
     // Taken from params on start, wrapped in Arc<Mutex<>>.
     filter: Option<Arc<Mutex<Box<dyn AudioFilter>>>>,
+    // Resampler wrapped for sharing with the audio task.
+    resampler: Option<Arc<Mutex<Box<dyn AudioResampler>>>>,
 
     // Stored context for the audio task (cloned from process_frame)
     ctx: Option<ProcessorContext>,
@@ -66,6 +70,7 @@ impl BaseInputTransport {
             audio_task: None,
             audio_drained: Arc::new(tokio::sync::Notify::new()),
             filter: None,
+            resampler: None,
             ctx: None,
         }
     }
@@ -80,6 +85,7 @@ impl BaseInputTransport {
             audio_task: None,
             audio_drained: Arc::new(tokio::sync::Notify::new()),
             filter: None,
+            resampler: None,
             ctx: None,
         }
     }
@@ -172,6 +178,11 @@ impl BaseInputTransport {
             filter.lock().await.start(self.sample_rate).await;
             self.filter = Some(filter);
         }
+
+        // Take resampler from params.
+        if let Some(resampler) = self.params.audio_in_resampler.take() {
+            self.resampler = Some(Arc::new(Mutex::new(resampler)));
+        }
     }
 
     async fn stop(&mut self) {
@@ -213,10 +224,12 @@ impl BaseInputTransport {
         let ctx = ctx.clone();
         let passthrough = self.params.audio_in_passthrough;
         let filter = self.filter.clone();
+        let resampler = self.resampler.clone();
+        let sample_rate = self.sample_rate;
         let drained = self.audio_drained.clone();
 
         self.audio_task = Some(tokio::spawn(async move {
-            audio_input_task(ctx, rx, passthrough, filter).await;
+            audio_input_task(ctx, rx, passthrough, filter, resampler, sample_rate).await;
             drained.notify_one();
         }));
     }
@@ -233,13 +246,15 @@ impl BaseInputTransport {
 
 /// Background task that processes queued audio frames and pushes them downstream.
 ///
-/// Applies the audio filter (if configured) before pushing frames. Matches
-/// the Python `_audio_task_handler` behavior in `base_input.py`.
+/// Applies the audio resampler and filter (if configured) before pushing frames.
+/// Matches the Python `_audio_task_handler` behavior in `base_input.py`.
 async fn audio_input_task(
     ctx: ProcessorContext,
     mut rx: mpsc::Receiver<AudioRawFrame>,
     passthrough: bool,
     filter: Option<Arc<Mutex<Box<dyn AudioFilter>>>>,
+    resampler: Option<Arc<Mutex<Box<dyn AudioResampler>>>>,
+    target_sample_rate: u32,
 ) {
     let mut received_first = false;
 
@@ -265,6 +280,30 @@ async fn audio_input_task(
             }
         };
 
+        // Downmix multi-channel audio to mono (resamplers expect mono).
+        if frame.num_channels > 1 {
+            frame.audio = downmix_to_mono(frame.audio, frame.num_channels);
+            frame.num_channels = 1;
+        }
+
+        // Resample if the frame's sample rate doesn't match the transport's target.
+        if frame.sample_rate != target_sample_rate && target_sample_rate > 0 {
+            if let Some(ref resampler) = resampler {
+                frame.audio = resampler
+                    .lock()
+                    .await
+                    .resample(frame.audio, frame.sample_rate, target_sample_rate)
+                    .await;
+                frame.sample_rate = target_sample_rate;
+            } else {
+                tracing::warn!(
+                    "Audio sample rate mismatch ({} != {}) but no resampler configured",
+                    frame.sample_rate,
+                    target_sample_rate
+                );
+            }
+        }
+
         // Apply audio filter if configured.
         if let Some(ref filter) = filter {
             let filtered_audio = filter.lock().await.filter(frame.audio).await;
@@ -279,6 +318,27 @@ async fn audio_input_task(
             ctx.send_downstream(Frame::InputAudioRaw(frame)).await.ok();
         }
     }
+}
+
+/// Downmix interleaved multi-channel i16 PCM to mono by averaging channels.
+fn downmix_to_mono(audio: Bytes, num_channels: u16) -> Bytes {
+    let ch = num_channels as usize;
+    let bytes_per_frame = ch * 2;
+    let num_frames = audio.len() / bytes_per_frame;
+    let mut out = Vec::with_capacity(num_frames * 2);
+
+    for frame_idx in 0..num_frames {
+        let mut sum: i32 = 0;
+        for c in 0..ch {
+            let offset = (frame_idx * ch + c) * 2;
+            let sample = i16::from_le_bytes([audio[offset], audio[offset + 1]]);
+            sum += sample as i32;
+        }
+        let mono = (sum / ch as i32) as i16;
+        out.extend_from_slice(&mono.to_le_bytes());
+    }
+
+    Bytes::from(out)
 }
 
 // ---------------------------------------------------------------------------

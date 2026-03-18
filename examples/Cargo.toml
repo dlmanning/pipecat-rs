@@ -18,5 +18,4 @@ tokio = { workspace = true }
 clap = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-hound = { workspace = true }
 whisper-rs = { workspace = true }
