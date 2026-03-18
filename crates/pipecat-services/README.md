@@ -11,10 +11,11 @@ AI service integrations for pipecat-rs. Provides base traits for LLM, STT, and T
 
 ## Providers
 
-| Provider       | Feature Flag | Capabilities                                                |
-| -------------- | ------------ | ----------------------------------------------------------- |
-| Claude Code    | *(always on)* | LLM (CLI subprocess with streaming JSON)                   |
-| OpenAI         | `openai`     | LLM (Chat Completions), Realtime API (WebSocket multimodal) |
+| Provider       | Feature Flag  | Capabilities                                                |
+| -------------- | ------------- | ----------------------------------------------------------- |
+| Claude Code    | *(always on)* | LLM (CLI subprocess with streaming JSON)                    |
+| macOS Say      | *(always on)* | TTS (macOS `say` command, no API key needed)                |
+| OpenAI         | `openai`      | LLM (Chat Completions), Realtime API (WebSocket multimodal) |
 | Deepgram       | `deepgram`    | STT (WebSocket streaming)                                   |
 | ElevenLabs     | `elevenlabs`  | STT (WebSocket realtime), TTS (WebSocket streaming)         |
 | Azure Speech   | `azure`       | STT (WebSocket), TTS (REST streaming)                       |

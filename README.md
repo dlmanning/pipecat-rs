@@ -48,6 +48,7 @@ pipecat-core
 | Provider        | Type          | Feature Flag  |
 | --------------- | ------------- | ------------- |
 | Claude Code     | LLM           | *(always on)* |
+| macOS Say       | TTS           | *(always on)* |
 | OpenAI          | LLM, Realtime | `openai`      |
 | Deepgram        | STT           | `deepgram`    |
 | ElevenLabs      | STT, TTS      | `elevenlabs`  |
@@ -241,6 +242,7 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 | Provider     | Python | Rust |
 | ------------ | :----: | :--: |
+| macOS Say    |   —    | Yes  |
 | ElevenLabs   |  Yes   | Yes  |
 | Azure        |  Yes   | Yes  |
 | Cartesia     |  Yes   |  —   |
