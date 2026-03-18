@@ -45,14 +45,14 @@ pipecat-core
 
 ## Supported Providers
 
-| Provider       | Type          | Feature Flag |
-| -------------- | ------------- | ------------ |
-| OpenAI         | LLM, Realtime | `openai`     |
-| Deepgram       | STT           | `deepgram`   |
-| ElevenLabs     | STT, TTS      | `elevenlabs` |
-| Azure Speech   | STT, TTS      | `azure`      |
-| AWS Transcribe | STT           | `aws`        |
-| Whisper (local)| STT           | `whisper`    |
+| Provider        | Type          | Feature Flag |
+| --------------- | ------------- | ------------ |
+| OpenAI          | LLM, Realtime | `openai`     |
+| Deepgram        | STT           | `deepgram`   |
+| ElevenLabs      | STT, TTS      | `elevenlabs` |
+| Azure Speech    | STT, TTS      | `azure`      |
+| AWS Transcribe  | STT           | `aws`        |
+| Whisper (local) | STT           | `whisper`    |
 
 ## Getting Started
 
@@ -145,18 +145,18 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 ### Transports
 
-| Transport                 | Python | Rust |
-| ------------------------- | :----: | :--: |
-| Base input/output         |  Yes   | Yes  |
-| Local audio               |  Yes   | Yes  |
+| Transport                 | Python |    Rust    |
+| ------------------------- | :----: | :--------: |
+| Base input/output         |  Yes   |    Yes     |
+| Local audio               |  Yes   |    Yes     |
 | Audio device playback     |   —    | Yes (cpal) |
-| Daily                     |  Yes   |  —   |
-| LiveKit                   |  Yes   |  —   |
-| WebSocket (client/server) |  Yes   |  —   |
-| SmallWebRTC               |  Yes   |  —   |
-| HeyGen                    |  Yes   |  —   |
-| Tavus                     |  Yes   |  —   |
-| WhatsApp                  |  Yes   |  —   |
+| Daily                     |  Yes   |     —      |
+| LiveKit                   |  Yes   |     —      |
+| WebSocket (client/server) |  Yes   |     —      |
+| SmallWebRTC               |  Yes   |     —      |
+| HeyGen                    |  Yes   |     —      |
+| Tavus                     |  Yes   |     —      |
+| WhatsApp                  |  Yes   |     —      |
 
 ### Audio
 
@@ -221,18 +221,18 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 ### Services — STT
 
-| Provider       | Python | Rust |
-| -------------- | :----: | :--: |
-| Deepgram       |  Yes   | Yes  |
-| ElevenLabs     |  Yes   | Yes  |
-| Azure          |  Yes   | Yes  |
-| AWS Transcribe |  Yes   | Yes  |
-| AssemblyAI     |  Yes   |  —   |
-| Google         |  Yes   |  —   |
-| Gladia         |  Yes   |  —   |
-| Speechmatics   |  Yes   |  —   |
-| Whisper (local)|  Yes   | Yes  |
-| Others (10+)   |  Yes   |  —   |
+| Provider        | Python | Rust |
+| --------------- | :----: | :--: |
+| Deepgram        |  Yes   | Yes  |
+| ElevenLabs      |  Yes   | Yes  |
+| Azure           |  Yes   | Yes  |
+| AWS Transcribe  |  Yes   | Yes  |
+| AssemblyAI      |  Yes   |  —   |
+| Google          |  Yes   |  —   |
+| Gladia          |  Yes   |  —   |
+| Speechmatics    |  Yes   |  —   |
+| Whisper (local) |  Yes   | Yes  |
+| Others (10+)    |  Yes   |  —   |
 
 ### Services — TTS
 

@@ -30,9 +30,9 @@ LocalAudioInput → VadProcessor → [AudioPlayer] → WhisperTranscribe
 
 ### Options
 
-| Flag | Description |
-|---|---|
-| `--realtime` | Process audio at real-time pace instead of as fast as possible |
-| `--play` | Play audio through speakers (implies `--realtime`) |
-| `--model <name>` | Whisper GGML model name (default: `tiny.en`) |
-| `--language <code>` | Language code (default: `en`) |
+| Flag                | Description                                                    |
+| ------------------- | -------------------------------------------------------------- |
+| `--realtime`        | Process audio at real-time pace instead of as fast as possible |
+| `--play`            | Play audio through speakers (implies `--realtime`)             |
+| `--model <name>`    | Whisper GGML model name (default: `tiny.en`)                   |
+| `--language <code>` | Language code (default: `en`)                                  |
