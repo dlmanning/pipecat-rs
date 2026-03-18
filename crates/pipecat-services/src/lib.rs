@@ -11,6 +11,8 @@ pub mod tts;
 pub mod aws;
 #[cfg(feature = "azure")]
 pub mod azure;
+#[cfg(feature = "claude-code")]
+pub mod claude_code;
 #[cfg(feature = "deepgram")]
 pub mod deepgram;
 #[cfg(feature = "elevenlabs")]

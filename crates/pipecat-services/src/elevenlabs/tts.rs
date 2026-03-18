@@ -78,16 +78,19 @@ impl ElevenLabsTTSService {
     }
 
     /// Build the WebSocket URL.
+    ///
+    /// Reads model/voice/language from `self.state.settings` (updated by
+    /// `TTSUpdateSettings` frames) so runtime changes take effect.
     fn build_url(&self) -> String {
         let voice_id = self
-            .elevenlabs_settings
-            .base
+            .state
+            .settings
             .voice
             .as_deref()
             .unwrap_or("21m00Tcm4TlvDq8ikWAM");
         let model = self
-            .elevenlabs_settings
-            .base
+            .state
+            .settings
             .model
             .as_deref()
             .unwrap_or("eleven_turbo_v2");
@@ -97,7 +100,7 @@ impl ElevenLabsTTSService {
             self.base_url, voice_id, model, self.output_format
         );
 
-        if let Some(ref lang) = self.elevenlabs_settings.base.language {
+        if let Some(ref lang) = self.state.settings.language {
             url.push_str(&format!("&language_code={lang}"));
         }
 

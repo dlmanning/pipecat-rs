@@ -45,14 +45,15 @@ pipecat-core
 
 ## Supported Providers
 
-| Provider        | Type          | Feature Flag |
-| --------------- | ------------- | ------------ |
-| OpenAI          | LLM, Realtime | `openai`     |
-| Deepgram        | STT           | `deepgram`   |
-| ElevenLabs      | STT, TTS      | `elevenlabs` |
-| Azure Speech    | STT, TTS      | `azure`      |
-| AWS Transcribe  | STT           | `aws`        |
-| Whisper (local) | STT           | `whisper`    |
+| Provider        | Type          | Feature Flag  |
+| --------------- | ------------- | ------------- |
+| Claude Code     | LLM           | `claude-code` |
+| OpenAI          | LLM, Realtime | `openai`      |
+| Deepgram        | STT           | `deepgram`    |
+| ElevenLabs      | STT, TTS      | `elevenlabs`  |
+| Azure Speech    | STT, TTS      | `azure`       |
+| AWS Transcribe  | STT           | `aws`         |
+| Whisper (local) | STT           | `whisper`     |
 
 ## Getting Started
 
@@ -62,7 +63,7 @@ Add the crates you need to your `Cargo.toml`:
 [dependencies]
 pipecat-core = { path = "crates/pipecat-core" }
 pipecat-pipeline = { path = "crates/pipecat-pipeline" }
-pipecat-services = { path = "crates/pipecat-services", features = ["openai", "deepgram", "elevenlabs", "azure", "aws"] }
+pipecat-services = { path = "crates/pipecat-services", features = ["claude-code", "openai", "deepgram", "elevenlabs", "azure", "aws"] }
 pipecat-context = { path = "crates/pipecat-context" }
 ```
 
@@ -205,9 +206,10 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 | Provider                  | Python | Rust |
 | ------------------------- | :----: | :--: |
+| Claude Code (CLI)         |   —    | Yes  |
 | OpenAI (Chat Completions) |  Yes   | Yes  |
 | OpenAI Realtime           |  Yes   | Yes  |
-| Anthropic Claude          |  Yes   |  —   |
+| Anthropic Claude (API)    |  Yes   |  —   |
 | Google Gemini             |  Yes   |  —   |
 | AWS Bedrock               |  Yes   |  —   |
 | Azure OpenAI              |  Yes   |  —   |

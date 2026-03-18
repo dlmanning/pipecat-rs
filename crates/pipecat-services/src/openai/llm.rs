@@ -49,9 +49,13 @@ impl OpenAILLMService {
     }
 
     /// Build the request body for the Chat Completions API.
+    ///
+    /// Reads base LLM settings from `self.state.settings` (updated by
+    /// `LLMUpdateSettings` frames) so that runtime setting changes take
+    /// effect. OpenAI-specific settings (max_completion_tokens, extra)
+    /// come from `self.openai_settings`.
     fn build_request_body(&self, context: &serde_json::Value) -> serde_json::Value {
-        let settings = &self.openai_settings;
-        let base = &settings.base;
+        let base = &self.state.settings;
 
         let mut body = serde_json::json!({
             "stream": true,
@@ -91,15 +95,12 @@ impl OpenAILLMService {
             body["tool_choice"] = tool_choice.clone();
         }
 
-        // Optional parameters
+        // Optional parameters from base (updated by LLMUpdateSettings)
         if let Some(temp) = base.temperature {
             body["temperature"] = serde_json::json!(temp);
         }
         if let Some(max) = base.max_tokens {
             body["max_tokens"] = serde_json::json!(max);
-        }
-        if let Some(max) = settings.max_completion_tokens {
-            body["max_completion_tokens"] = serde_json::json!(max);
         }
         if let Some(top_p) = base.top_p {
             body["top_p"] = serde_json::json!(top_p);
@@ -114,8 +115,13 @@ impl OpenAILLMService {
             body["seed"] = serde_json::json!(seed);
         }
 
+        // OpenAI-specific settings
+        if let Some(max) = self.openai_settings.max_completion_tokens {
+            body["max_completion_tokens"] = serde_json::json!(max);
+        }
+
         // Extra settings override everything
-        for (k, v) in &settings.extra {
+        for (k, v) in &self.openai_settings.extra {
             body[k] = v.clone();
         }
 

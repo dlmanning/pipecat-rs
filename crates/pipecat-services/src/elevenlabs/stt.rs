@@ -63,10 +63,13 @@ impl ElevenLabsRealtimeSTTService {
     }
 
     /// Build the WebSocket URL.
+    ///
+    /// Reads model/language from `self.state.settings` (updated by
+    /// `STTUpdateSettings` frames) so runtime changes take effect.
     fn build_url(&self) -> String {
         let model = self
-            .elevenlabs_settings
-            .base
+            .state
+            .settings
             .model
             .as_deref()
             .unwrap_or("scribe_v2_realtime");
@@ -77,7 +80,7 @@ impl ElevenLabsRealtimeSTTService {
             self.base_url, model, self.audio_format, strategy
         );
 
-        if let Some(ref lang) = self.elevenlabs_settings.base.language {
+        if let Some(ref lang) = self.state.settings.language {
             url.push_str(&format!("&language_code={lang}"));
         }
 
