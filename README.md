@@ -276,6 +276,13 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 
 See [`examples/`](examples/) for runnable demos.
 
+- **[listen-and-respond](examples/)** — Voice conversational agent running entirely locally. Mic → Whisper STT → Claude Code LLM → macOS Say TTS → Speaker. No API keys needed.
+
+```bash
+cargo run -p pipecat-examples --bin listen-and-respond
+cargo run -p pipecat-examples --bin listen-and-respond -- --model opus --voice Alex
+```
+
 - **[transcribe](examples/)** — Transcribe audio using Silero VAD + local Whisper STT. Supports file input with optional speaker playback, or live microphone capture.
 
 ```bash

@@ -1,33 +1,80 @@
 # Examples
 
-## transcribe
+Examples are organized into `foundational/` for core pipeline demonstrations.
 
-Transcribe audio using Silero VAD + local Whisper STT. Supports file input (WAV, MP3, FLAC, OGG/Vorbis, AAC via symphonia) or live microphone capture. Demonstrates building a pipeline with `PipelineTask`, `LocalAudioInputTransport`/`MicInput`, `VadProcessor`, and a custom `WhisperTranscribeProcessor`.
+## foundational/listen-and-respond
+
+A voice conversational agent running entirely locally — no API keys or network needed.
+
+Mic → VAD → Whisper STT → User Aggregator → Claude Code LLM → macOS Say TTS → Speaker → Assistant Aggregator
+
+Requires macOS (for `say` TTS) and the `claude` CLI installed and authenticated.
 
 ```bash
-# Transcribe a file as fast as possible (default)
+# Default: sonnet model, Samantha voice
+cargo run -p pipecat-examples --bin listen-and-respond
+
+# Choose a different model and voice
+cargo run -p pipecat-examples --bin listen-and-respond -- --model opus --voice Alex
+
+# Custom system prompt
+cargo run -p pipecat-examples --bin listen-and-respond -- --system "You are a pirate. Respond in pirate speak."
+
+# List audio devices
+cargo run -p pipecat-examples --bin listen-and-respond -- --list-devices
+
+# Use a specific microphone
+cargo run -p pipecat-examples --bin listen-and-respond -- --device "MacBook Pro Microphone"
+```
+
+### Pipeline
+
+```
+MicInput → VadProcessor → WhisperSTT → UserAggregator → ClaudeCodeLLM → MacOSSayTTS → AudioPlayer → AssistantAggregator
+```
+
+- **MicInput** captures audio from the system microphone
+- **VadProcessor** detects speech start/stop using Silero VAD
+- **WhisperSTT** transcribes speech segments locally using whisper.cpp
+- **UserAggregator** accumulates transcriptions into user messages and manages turn lifecycle
+- **ClaudeCodeLLM** generates responses via the `claude` CLI (built-in tools disabled, LLM mode)
+- **MacOSSayTTS** synthesizes speech using the macOS `say` command
+- **AudioPlayer** plays audio through the default system output device
+- **AssistantAggregator** records assistant responses back into the conversation context
+
+### Options
+
+| Flag                 | Description                                            |
+| -------------------- | ------------------------------------------------------ |
+| `--model <name>`     | Claude model: sonnet, opus, haiku (default: sonnet)    |
+| `--voice <name>`     | macOS Say voice (default: Samantha)                    |
+| `--speech-rate <n>`  | TTS words per minute                                   |
+| `--whisper-model <n>`| Whisper GGML model name (default: tiny.en)             |
+| `--language <code>`  | Language code for Whisper (default: en)                 |
+| `--device <name>`    | Select a specific input device                         |
+| `--list-devices`     | List available audio input devices and exit            |
+| `--stop-secs <f64>` | Silence duration before speech stop (default: 0.5)     |
+| `--system <text>`    | Custom system instruction for the LLM                  |
+
+---
+
+## foundational/transcribe
+
+Transcribe audio using Silero VAD + local Whisper STT. Supports file input (WAV, MP3, FLAC, OGG/Vorbis, AAC) or live microphone capture.
+
+```bash
+# Transcribe a file
 cargo run -p pipecat-examples --bin transcribe -- audio.wav
 
-# Transcribe an MP3 file
-cargo run -p pipecat-examples --bin transcribe -- recording.mp3
-
-# Transcribe at real-time pace
-cargo run -p pipecat-examples --bin transcribe -- audio.wav --realtime
-
-# Transcribe and play audio through speakers
+# Transcribe and play audio
 cargo run -p pipecat-examples --bin transcribe -- audio.wav --play
 
 # Transcribe from microphone
 cargo run -p pipecat-examples --bin transcribe -- --mic
 
-# Transcribe from a specific microphone
-cargo run -p pipecat-examples --bin transcribe -- --mic --device "MacBook Pro Microphone"
-
 # List available audio input devices
 cargo run -p pipecat-examples --bin transcribe -- --list-devices
 ```
-
-The Whisper model (`tiny.en` by default) is downloaded automatically to `~/.cache/pipecat-rs/whisper/` on first run.
 
 ### Pipeline
 
@@ -35,20 +82,15 @@ The Whisper model (`tiny.en` by default) is downloaded automatically to `~/.cach
 Input (file or mic) → VadProcessor → [AudioPlayer] → WhisperTranscribe
 ```
 
-- **Input** reads audio from a file or captures from the microphone, feeding 20ms chunks into the pipeline
-- **VadProcessor** detects speech start/stop using Silero VAD
-- **AudioPlayer** (optional, `--play`, file mode only) plays audio through the default system output device via cpal
-- **WhisperTranscribe** buffers audio during speech segments and transcribes on speech stop
-
 ### Options
 
-| Flag                   | Description                                                    |
-| ---------------------- | -------------------------------------------------------------- |
-| `--mic`                | Use system microphone as input (Ctrl+C to stop)                |
-| `--device <name>`      | Select a specific input device (requires `--mic`)              |
-| `--list-devices`       | List available audio input devices and exit                    |
-| `--realtime`           | Process audio at real-time pace instead of as fast as possible |
-| `--play`               | Play audio through speakers (implies `--realtime`, file only)  |
-| `--model <name>`       | Whisper GGML model name (default: `tiny.en`)                   |
-| `--language <code>`    | Language code (default: `en`)                                  |
-| `--stop-secs <f64>`   | Silence duration before speech stop (default: `0.2`)           |
+| Flag                 | Description                                                    |
+| -------------------- | -------------------------------------------------------------- |
+| `--mic`              | Use system microphone as input (Ctrl+C to stop)                |
+| `--device <name>`    | Select a specific input device (requires `--mic`)              |
+| `--list-devices`     | List available audio input devices and exit                    |
+| `--realtime`         | Process audio at real-time pace instead of as fast as possible |
+| `--play`             | Play audio through speakers (implies `--realtime`, file only)  |
+| `--model <name>`     | Whisper GGML model name (default: `tiny.en`)                   |
+| `--language <code>`  | Language code (default: `en`)                                  |
+| `--stop-secs <f64>` | Silence duration before speech stop (default: `0.2`)           |
