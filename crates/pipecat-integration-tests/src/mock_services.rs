@@ -79,6 +79,81 @@ impl FrameProcessor for FakeSTTService {
 }
 
 // ---------------------------------------------------------------------------
+// SequentialFakeSTTService
+// ---------------------------------------------------------------------------
+
+/// Fake STT that cycles through a list of canned responses, emitting the next
+/// one each time it has received enough audio chunks.
+#[derive(Debug)]
+pub struct SequentialFakeSTTService {
+    state: STTServiceState,
+    responses: Vec<String>,
+    response_index: usize,
+    chunks_before_emit: usize,
+    audio_chunk_count: usize,
+}
+
+impl SequentialFakeSTTService {
+    pub fn new(responses: Vec<&str>, chunks_before_emit: usize) -> Self {
+        Self {
+            state: STTServiceState::new("SequentialFakeSTT", STTSettings::default()),
+            responses: responses.into_iter().map(String::from).collect(),
+            response_index: 0,
+            chunks_before_emit,
+            audio_chunk_count: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl STTService for SequentialFakeSTTService {
+    async fn run_stt(&mut self, _audio: Bytes, ctx: &ProcessorContext) -> Result<()> {
+        self.audio_chunk_count += 1;
+        if self.audio_chunk_count >= self.chunks_before_emit {
+            self.audio_chunk_count = 0;
+            let text = self.responses[self.response_index % self.responses.len()].clone();
+            self.response_index += 1;
+
+            ctx.send_downstream(Frame::Transcription(TranscriptionFrame {
+                text,
+                user_id: "user".to_string(),
+                timestamp: None,
+                language: None,
+                finalized: true,
+                result: None,
+            }))
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn stt_service_state(&self) -> &STTServiceState {
+        &self.state
+    }
+    fn stt_service_state_mut(&mut self) -> &mut STTServiceState {
+        &mut self.state
+    }
+}
+
+#[async_trait]
+impl FrameProcessor for SequentialFakeSTTService {
+    fn name(&self) -> &str {
+        self.state.base.processor.name()
+    }
+    fn id(&self) -> u64 {
+        self.state.base.processor.id()
+    }
+    async fn process_frame(
+        &mut self,
+        envelope: FrameEnvelope,
+        direction: Direction,
+        ctx: &ProcessorContext,
+    ) -> Result<()> {
+        stt_process_frame(self, envelope, direction, ctx).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FakeLLMService
 // ---------------------------------------------------------------------------
 

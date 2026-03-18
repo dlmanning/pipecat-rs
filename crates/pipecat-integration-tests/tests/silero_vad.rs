@@ -42,7 +42,10 @@ fn make_controller() -> VadController<SileroVadAnalyzer> {
 }
 
 /// Feed PCM data through the controller in VAD-sized chunks, collecting all events.
-fn feed_audio(controller: &mut VadController<SileroVadAnalyzer>, pcm: &[u8]) -> Vec<VadControllerEvent> {
+fn feed_audio(
+    controller: &mut VadController<SileroVadAnalyzer>,
+    pcm: &[u8],
+) -> Vec<VadControllerEvent> {
     let mut all_events = Vec::new();
     for chunk in pcm.chunks_exact(VAD_CHUNK_BYTES) {
         all_events.extend(controller.handle_audio(chunk));

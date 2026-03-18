@@ -1,18 +1,11 @@
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
-use bytes::Bytes;
 use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorParams};
-use pipecat_core::error::Result;
 use pipecat_core::frame::*;
-use pipecat_core::processor::{FrameProcessor, ProcessorContext};
 use pipecat_core::test_utils::*;
 use pipecat_integration_tests::helpers::*;
 use pipecat_integration_tests::mock_services::*;
 use pipecat_pipeline::Pipeline;
-use pipecat_services::settings::STTSettings;
-use pipecat_services::stt::{STTService, STTServiceState, stt_process_frame};
 use pipecat_turns::{
     SpeechTimeoutUserTurnStopStrategy, UserTurnStrategies, VadUserTurnStartStrategy,
 };
@@ -20,85 +13,6 @@ use serde_json::json;
 use tokio::time::timeout;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-// ---------------------------------------------------------------------------
-// SequentialFakeSTTService: returns different canned text for each turn
-// ---------------------------------------------------------------------------
-
-/// Fake STT that cycles through a list of canned responses, emitting the next
-/// one each time it has received enough audio chunks.
-#[derive(Debug)]
-struct SequentialFakeSTTService {
-    state: STTServiceState,
-    responses: Vec<String>,
-    call_index: Arc<Mutex<usize>>,
-    chunks_before_emit: usize,
-    audio_chunk_count: usize,
-}
-
-impl SequentialFakeSTTService {
-    fn new(responses: Vec<&str>, chunks_before_emit: usize) -> Self {
-        Self {
-            state: STTServiceState::new("SequentialFakeSTT", STTSettings::default()),
-            responses: responses.into_iter().map(String::from).collect(),
-            call_index: Arc::new(Mutex::new(0)),
-            chunks_before_emit,
-            audio_chunk_count: 0,
-        }
-    }
-}
-
-#[async_trait]
-impl STTService for SequentialFakeSTTService {
-    async fn run_stt(&mut self, _audio: Bytes, ctx: &ProcessorContext) -> Result<()> {
-        self.audio_chunk_count += 1;
-        if self.audio_chunk_count >= self.chunks_before_emit {
-            self.audio_chunk_count = 0;
-            let text = {
-                let mut idx = self.call_index.lock().unwrap();
-                let t = self.responses[*idx % self.responses.len()].clone();
-                *idx += 1;
-                t
-            };
-
-            ctx.send_downstream(Frame::Transcription(TranscriptionFrame {
-                text,
-                user_id: "user".to_string(),
-                timestamp: None,
-                language: None,
-                finalized: true,
-                result: None,
-            }))
-            .await?;
-        }
-        Ok(())
-    }
-
-    fn stt_service_state(&self) -> &STTServiceState {
-        &self.state
-    }
-    fn stt_service_state_mut(&mut self) -> &mut STTServiceState {
-        &mut self.state
-    }
-}
-
-#[async_trait]
-impl FrameProcessor for SequentialFakeSTTService {
-    fn name(&self) -> &str {
-        self.state.base.processor.name()
-    }
-    fn id(&self) -> u64 {
-        self.state.base.processor.id()
-    }
-    async fn process_frame(
-        &mut self,
-        envelope: FrameEnvelope,
-        direction: Direction,
-        ctx: &ProcessorContext,
-    ) -> Result<()> {
-        stt_process_frame(self, envelope, direction, ctx).await
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Helper: run one full user turn (VAD start -> audio -> VAD stop -> wait)
