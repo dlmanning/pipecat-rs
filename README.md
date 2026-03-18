@@ -48,7 +48,7 @@ pipecat-core
 | Provider        | Type          | Feature Flag  |
 | --------------- | ------------- | ------------- |
 | Claude Code     | LLM           | *(always on)* |
-| macOS Say       | TTS           | *(always on)* |
+| macOS Say       | TTS           | *(macOS only)* |
 | OpenAI          | LLM, Realtime | `openai`      |
 | Deepgram        | STT           | `deepgram`    |
 | ElevenLabs      | STT, TTS      | `elevenlabs`  |
