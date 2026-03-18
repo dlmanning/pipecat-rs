@@ -1,0 +1,21 @@
+[package]
+name = "pipecat-examples"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "transcribe"
+path = "transcribe.rs"
+
+[dependencies]
+pipecat-core = { workspace = true, features = ["test-utils"] }
+pipecat-pipeline = { workspace = true }
+pipecat-transport = { workspace = true }
+pipecat-audio = { workspace = true, features = ["silero"] }
+pipecat-services = { workspace = true, features = ["whisper"] }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+hound = { workspace = true }
+whisper-rs = { workspace = true }

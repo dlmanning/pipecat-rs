@@ -8,6 +8,7 @@ members = [
     "crates/pipecat-context",
     "crates/pipecat-services",
     "crates/pipecat-integration-tests",
+    "examples",
 ]
 resolver = "2"
 
