@@ -149,6 +149,7 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | ------------------------- | :----: | :--: |
 | Base input/output         |  Yes   | Yes  |
 | Local audio               |  Yes   | Yes  |
+| Audio device playback     |   —    | Yes (cpal) |
 | Daily                     |  Yes   |  —   |
 | LiveKit                   |  Yes   |  —   |
 | WebSocket (client/server) |  Yes   |  —   |
@@ -265,6 +266,16 @@ Comparison with the [Python pipecat](https://github.com/pipecat-ai/pipecat) fram
 | LLM/service switching                |    Yes    |    —    |
 | IVR / voicemail extensions           |    Yes    |    —    |
 | OpenTelemetry tracing                |    Yes    |    —    |
+
+## Examples
+
+See [`examples/`](examples/) for runnable demos.
+
+- **[transcribe](examples/)** — Transcribe a WAV file using Silero VAD + local Whisper STT, with optional speaker playback (`--play`)
+
+```bash
+cargo run -p pipecat-examples --bin transcribe -- audio.wav --play
+```
 
 ## Building
 

@@ -6,7 +6,8 @@ Audio processing utilities for pipecat-rs. Provides voice activity detection (VA
 
 - **`VadAnalyzer`** — Trait for voice activity detection implementations
 - **`VadAnalyzerBase`** — State machine implementation with configurable thresholds, tracking `VadState` (Quiet, Starting, Speaking, Stopping) transitions
-- **`VadController`** — Wraps an analyzer and emits `VadControllerEvent`s for speech start/stop
+- **`VadController`** — Wraps an analyzer with internal audio buffering and emits `VadControllerEvent`s for speech start/stop. Accepts arbitrary-length audio buffers.
+- **`VadProcessor`** — Ready-made `FrameProcessor` that wraps a `VadController`, converting `InputAudioRaw` frames into `VADUserStartedSpeaking`, `VADUserStoppedSpeaking`, and `UserSpeaking` frames
 - **`AudioFilter`** — Trait for audio input/output filtering with dynamic configuration via `FilterControlFrame`
 - **`Resampler`** — Trait for audio resampling, with linear and optional sinc implementations
 
