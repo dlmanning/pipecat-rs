@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
+aec3 = ["dep:aec3"]
 opus = ["dep:audiopus"]
 sinc-resampler = ["dep:rubato"]
 silero = ["dep:ort", "dep:ndarray"]
@@ -23,6 +24,9 @@ audiopus = { version = "0.2", optional = true }
 
 # Optional resampler dependencies
 rubato = { version = "0.16", optional = true }
+
+# Optional AEC dependencies
+aec3 = { version = "0.1", optional = true }
 
 # Optional Silero VAD dependencies
 ort = { workspace = true, optional = true, features = ["download-binaries", "copy-dylibs", "tls-native"] }

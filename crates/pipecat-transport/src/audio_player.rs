@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use pipecat_audio::echo::EchoReferenceSink;
 use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
@@ -11,10 +13,23 @@ use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
 // ---------------------------------------------------------------------------
 
 /// Configuration for audio device playback.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AudioPlayerConfig {
     /// Device name to use. `None` selects the system default output device.
     pub device_name: Option<String>,
+    /// Echo reference sink for acoustic echo cancellation.
+    /// When set, the player feeds audio to this sink so an AEC filter on the
+    /// input side can cancel echoes from the speaker.
+    pub echo_reference_sink: Option<Arc<dyn EchoReferenceSink>>,
+}
+
+impl fmt::Debug for AudioPlayerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AudioPlayerConfig")
+            .field("device_name", &self.device_name)
+            .field("echo_reference_sink", &self.echo_reference_sink.is_some())
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,10 +197,20 @@ fn remap_channels(samples: &[f32], from_ch: u16, to_ch: u16) -> Vec<f32> {
 /// Lazy-initializes the cpal stream on the first `InputAudioRaw` frame
 /// and defers `play()` until enough audio has been pre-buffered to absorb
 /// scheduling jitter.
-#[derive(Debug)]
 pub struct AudioPlayer {
     base: ProcessorBase,
     state: PlaybackState,
+    echo_reference_sink: Option<Arc<dyn EchoReferenceSink>>,
+}
+
+impl fmt::Debug for AudioPlayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AudioPlayer")
+            .field("base", &self.base)
+            .field("state", &self.state)
+            .field("echo_reference_sink", &self.echo_reference_sink.is_some())
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for PlaybackState {
@@ -200,9 +225,11 @@ impl std::fmt::Debug for PlaybackState {
 
 impl AudioPlayer {
     pub fn new(config: AudioPlayerConfig) -> Self {
+        let echo_sink = config.echo_reference_sink.clone();
         Self {
             base: ProcessorBase::new("AudioPlayer"),
             state: PlaybackState::Pending(config),
+            echo_reference_sink: echo_sink,
         }
     }
 
@@ -332,6 +359,10 @@ impl FrameProcessor for AudioPlayer {
                     sample_rate: tts.sample_rate,
                     num_channels: tts.num_channels,
                 };
+                if let Some(ref sink) = self.echo_reference_sink {
+                    sink.write_render(&audio.audio, audio.sample_rate, audio.num_channels)
+                        .await;
+                }
                 self.push_audio(&audio);
             }
             Frame::End(_) | Frame::Cancel(_) => {

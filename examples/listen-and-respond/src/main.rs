@@ -1,6 +1,6 @@
 //! Listen and respond: a voice conversational agent using local services.
 //!
-//! Mic → VAD → Whisper STT → User Aggregator → Claude Code LLM → macOS Say TTS → Speaker → Assistant Aggregator
+//! Mic (AEC3 filter) → VAD → Whisper STT → Filter → User Aggregator → Claude Code LLM → macOS Say TTS → Speaker (AEC3 sink) → Assistant Aggregator
 //!
 //! Uses only local services — no third-party API keys needed. Requires:
 //! - macOS (for `say` TTS)
@@ -13,12 +13,13 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::Parser;
+use pipecat_audio::aec3::{Aec3Config, Aec3Filter};
+use pipecat_audio::resampler::LinearResampler;
 use pipecat_audio::vad::{SileroVadAnalyzer, VadController, VadProcessor};
 use pipecat_context::{LLMContext, LLMContextAggregatorPair, LLMUserAggregatorParams};
 use pipecat_core::VadParams;
@@ -37,11 +38,6 @@ use pipecat_turns::{
 };
 
 const SAMPLE_RATE: u32 = 16000;
-
-/// Extra seconds to keep muted after audio finishes, accounting for speaker
-/// latency and sound travel time. Keep this short to avoid muting real user
-/// speech — proper echo cancellation (AEC) would be a better solution.
-const ECHO_MARGIN_SECS: f64 = 0.5;
 
 /// Whisper artifacts that should not be sent to the LLM.
 const WHISPER_ARTIFACTS: &[&str] = &[
@@ -96,42 +92,20 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
-// Shared mute timestamp
+// TranscriptionFilter — drops Whisper artifacts
 // ---------------------------------------------------------------------------
 
-/// Epoch millis until which the mic should be muted.
-/// Shared between the `EchoGuard` (writer) and `TranscriptionFilter` (reader).
-type MuteUntil = Arc<AtomicI64>;
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
-// ---------------------------------------------------------------------------
-// TranscriptionFilter — drops artifacts and echo
-// ---------------------------------------------------------------------------
-
-/// Suppresses transcriptions while the bot is speaking/playing audio, and
-/// filters out Whisper artifacts like `[BLANK_AUDIO]`.
+/// Filters out Whisper artifacts like `[BLANK_AUDIO]` that would confuse the LLM.
 #[derive(Debug)]
 struct TranscriptionFilter {
     base: ProcessorBase,
-    mute_until: MuteUntil,
 }
 
 impl TranscriptionFilter {
-    fn new(mute_until: MuteUntil) -> Self {
+    fn new() -> Self {
         Self {
             base: ProcessorBase::new("TranscriptionFilter"),
-            mute_until,
         }
-    }
-
-    fn is_suppressed(&self) -> bool {
-        now_millis() < self.mute_until.load(Ordering::Relaxed)
     }
 
     fn is_artifact(text: &str) -> bool {
@@ -159,92 +133,14 @@ impl FrameProcessor for TranscriptionFilter {
         ctx: &ProcessorContext,
     ) -> Result<()> {
         match &envelope.frame {
-            Frame::Transcription(t) if self.is_suppressed() || Self::is_artifact(&t.text) => {}
-            Frame::Transcription(_) => {
-                ctx.push_frame(envelope, direction).await?;
-                return Ok(());
+            Frame::Transcription(t) if Self::is_artifact(&t.text) => {
+                // Drop artifact transcriptions.
             }
             _ => {
                 ctx.push_frame(envelope, direction).await?;
-                return Ok(());
             }
         }
         Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// EchoGuard — placed after TTS to track actual audio duration
-// ---------------------------------------------------------------------------
-
-/// Tracks `TTSAudioRaw` frames and sets the mute window based on cumulative
-/// audio duration. Placed after the TTS so it sees the real audio output.
-///
-/// On `LLMFullResponseStart`: mute immediately, reset audio accumulator.
-/// On each `TTSAudioRaw`: accumulate audio duration.
-/// On `LLMFullResponseEnd`: set mute to `now + total_audio_duration + margin`.
-///   (At this point all TTS synthesis is complete and audio is queued.)
-#[derive(Debug)]
-struct EchoGuard {
-    base: ProcessorBase,
-    mute_until: MuteUntil,
-    /// Cumulative audio seconds in the current response.
-    audio_secs: f64,
-}
-
-impl EchoGuard {
-    fn new(mute_until: MuteUntil) -> Self {
-        Self {
-            base: ProcessorBase::new("EchoGuard"),
-            mute_until,
-            audio_secs: 0.0,
-        }
-    }
-}
-
-#[async_trait]
-impl FrameProcessor for EchoGuard {
-    fn name(&self) -> &str {
-        self.base.name()
-    }
-
-    fn id(&self) -> u64 {
-        self.base.id()
-    }
-
-    async fn process_frame(
-        &mut self,
-        envelope: FrameEnvelope,
-        direction: Direction,
-        ctx: &ProcessorContext,
-    ) -> Result<()> {
-        match &envelope.frame {
-            Frame::LLMFullResponseStart(_) => {
-                self.audio_secs = 0.0;
-                self.mute_until.store(i64::MAX, Ordering::Relaxed);
-            }
-            Frame::TTSAudioRaw(tts) => {
-                let bytes_per_sec = tts.sample_rate as f64 * 2.0 * tts.num_channels as f64;
-                self.audio_secs += tts.audio.len() as f64 / bytes_per_sec;
-            }
-            Frame::LLMFullResponseEnd(_) => {
-                if self.audio_secs > 0.0 {
-                    let mute_secs = self.audio_secs + ECHO_MARGIN_SECS;
-                    let until = now_millis() + (mute_secs * 1000.0) as i64;
-                    self.mute_until.store(until, Ordering::Relaxed);
-                    eprintln!(
-                        "  [echo guard: unmuting in {:.1}s ({:.1}s audio + {:.1}s margin)]",
-                        mute_secs, self.audio_secs, ECHO_MARGIN_SECS
-                    );
-                } else {
-                    self.mute_until.store(0, Ordering::Relaxed);
-                    eprintln!("  [echo guard: unmuted (no audio)]");
-                }
-            }
-            _ => {}
-        }
-
-        ctx.push_frame(envelope, direction).await
     }
 }
 
@@ -522,10 +418,18 @@ fn main() {
 
     // --- Build pipeline components ---
 
-    // Input: microphone
+    // AEC3: acoustic echo cancellation
+    let (aec_filter, aec_sink) = Aec3Filter::create(Aec3Config {
+        sample_rate: SAMPLE_RATE,
+    })
+    .expect("Failed to create AEC3 filter");
+
+    // Input: microphone (with AEC filter and resampler to match AEC sample rate)
     let mic = MicInput::new(
         TransportParams {
             audio_in_enabled: true,
+            // audio_in_filter: Some(aec_filter),
+            audio_in_resampler: Some(Box::new(LinearResampler::new())),
             ..Default::default()
         },
         MicInputConfig {
@@ -556,11 +460,8 @@ fn main() {
     .expect("failed to load Whisper model");
     stt.set_audio_passthrough(false);
 
-    // Shared mute timestamp for echo suppression
-    let mute_until: MuteUntil = Arc::new(AtomicI64::new(0));
-
-    // Filter out Whisper artifacts and suppress mic echo while bot speaks
-    let filter = TranscriptionFilter::new(mute_until.clone());
+    // Filter out Whisper artifacts
+    let filter = TranscriptionFilter::new();
 
     // Context aggregators — system instruction goes in LLMSettings, not the
     // messages array, so it's passed as --system-prompt to Claude Code
@@ -590,18 +491,18 @@ fn main() {
     // TTS: inline say (bypasses TTS framework's sentence-by-sentence synthesis)
     let say_tts = SayTTS::new(args.voice, args.speech_rate, SAMPLE_RATE);
 
-    // Echo guard — tracks TTS audio duration, placed after TTS
-    let echo_guard = EchoGuard::new(mute_until);
-
     // Conversation loggers
     let user_logger = ConversationLogger::new();
     let bot_logger = ConversationLogger::new();
 
-    // Output: speaker
-    let speaker = AudioPlayer::new(AudioPlayerConfig::default());
+    // Output: speaker (with AEC echo reference sink)
+    let speaker = AudioPlayer::new(AudioPlayerConfig {
+        echo_reference_sink: Some(aec_sink),
+        ..Default::default()
+    });
 
     // --- Assemble pipeline ---
-    // Mic → VAD → STT → Filter → UserLogger → UserAgg → LLM → BotLogger → SayTTS → EchoGuard → Speaker → AssistantAgg
+    // Mic (AEC filter) → VAD → STT → Filter → UserLogger → UserAgg → LLM → BotLogger → SayTTS → Speaker (AEC sink) → AssistantAgg
     let pipeline = Pipeline::new(vec![
         Box::new(mic),
         Box::new(vad),
@@ -612,7 +513,6 @@ fn main() {
         Box::new(llm),
         Box::new(bot_logger),
         Box::new(say_tts),
-        Box::new(echo_guard),
         Box::new(speaker),
         assistant_agg,
     ]);

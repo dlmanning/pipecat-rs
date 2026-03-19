@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
+use pipecat_audio::echo::EchoReferenceSink;
 use pipecat_audio::mixer::{AudioMixer, MixerControlFrame};
 use pipecat_audio::resampler::AudioResampler;
 use pipecat_core::error::Result;
@@ -167,12 +168,14 @@ struct MediaSender {
     callbacks: Arc<dyn OutputTransportCallbacks>,
     resampler: Option<Arc<Mutex<Box<dyn AudioResampler>>>>,
     mixer: Option<Arc<Mutex<Box<dyn AudioMixer>>>>,
+    echo_reference_sink: Option<Arc<dyn EchoReferenceSink>>,
 
     // Bot speaking state (tracked via audio task, but need for interruption check)
     bot_speaking: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MediaSender {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         destination: Option<String>,
         sample_rate: u32,
@@ -181,6 +184,7 @@ impl MediaSender {
         callbacks: Arc<dyn OutputTransportCallbacks>,
         resampler: Option<Arc<Mutex<Box<dyn AudioResampler>>>>,
         mixer: Option<Arc<Mutex<Box<dyn AudioMixer>>>>,
+        echo_reference_sink: Option<Arc<dyn EchoReferenceSink>>,
     ) -> Self {
         Self {
             destination,
@@ -207,6 +211,7 @@ impl MediaSender {
             callbacks,
             resampler,
             mixer,
+            echo_reference_sink,
             bot_speaking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -437,6 +442,7 @@ impl MediaSender {
         let end_silence_secs = self.audio_out_end_silence_secs;
 
         let destination = self.destination.clone();
+        let echo_reference_sink = self.echo_reference_sink.clone();
 
         self.audio_task = Some(tokio::spawn(audio_output_task(
             ctx,
@@ -450,6 +456,7 @@ impl MediaSender {
             audio_chunk_size,
             end_silence_secs,
             destination,
+            echo_reference_sink,
         )));
     }
 
@@ -676,6 +683,7 @@ async fn audio_output_task(
     audio_chunk_size: usize,
     end_silence_secs: u32,
     destination: Option<String>,
+    echo_reference_sink: Option<Arc<dyn EchoReferenceSink>>,
 ) {
     let mut state = BotSpeakingState::new();
     let timeout_duration = if has_mixer {
@@ -713,6 +721,14 @@ async fn audio_output_task(
                             sample_rate,
                             num_channels: channels,
                         };
+                        if let Some(ref sink) = echo_reference_sink {
+                            sink.write_render(
+                                &silence.audio,
+                                silence.sample_rate,
+                                silence.num_channels,
+                            )
+                            .await;
+                        }
                         callbacks.write_audio_frame(&silence).await;
                         offset += chunk_len;
                     }
@@ -739,6 +755,10 @@ async fn audio_output_task(
                         audio
                     };
 
+                    if let Some(ref sink) = echo_reference_sink {
+                        sink.write_render(&audio.audio, audio.sample_rate, audio.num_channels)
+                            .await;
+                    }
                     if callbacks.write_audio_frame(&audio).await {
                         ctx.push_frame(envelope, Direction::Downstream).await.ok();
                     }
@@ -769,6 +789,10 @@ async fn audio_output_task(
                         audio
                     };
 
+                    if let Some(ref sink) = echo_reference_sink {
+                        sink.write_render(&audio.audio, audio.sample_rate, audio.num_channels)
+                            .await;
+                    }
                     if callbacks.write_audio_frame(&audio).await {
                         ctx.push_frame(envelope, Direction::Downstream).await.ok();
                     }
@@ -788,6 +812,10 @@ async fn audio_output_task(
                         audio
                     };
 
+                    if let Some(ref sink) = echo_reference_sink {
+                        sink.write_render(&audio.audio, audio.sample_rate, audio.num_channels)
+                            .await;
+                    }
                     if callbacks.write_audio_frame(&audio).await {
                         ctx.push_frame(envelope, Direction::Downstream).await.ok();
                     }
@@ -1175,6 +1203,9 @@ impl BaseOutputTransport {
             .take()
             .map(|m| Arc::new(Mutex::new(m)));
 
+        // Clone echo reference sink for sharing across senders.
+        let echo_reference_sink = self.params.echo_reference_sink.clone();
+
         // Create default sender with the default mixer.
         let mut default_sender = MediaSender::new(
             None,
@@ -1184,6 +1215,7 @@ impl BaseOutputTransport {
             self.callbacks.clone(),
             resampler.clone(),
             default_mixer,
+            echo_reference_sink.clone(),
         );
         default_sender.start(ctx.clone()).await;
         self.media_senders.insert(None, default_sender);
@@ -1216,6 +1248,7 @@ impl BaseOutputTransport {
                 self.callbacks.clone(),
                 resampler.clone(),
                 dest_mixer,
+                echo_reference_sink.clone(),
             );
             sender.start(ctx.clone()).await;
             self.media_senders.insert(Some(dest.clone()), sender);
@@ -2539,6 +2572,93 @@ mod tests {
                 .media_senders
                 .contains_key(&Some("dest1".to_string()))
         );
+
+        transport.cancel().await;
+    }
+
+    // -- Mock echo reference sink --
+
+    struct MockEchoReferenceSink {
+        calls: Arc<StdMutex<Vec<(Vec<u8>, u32, u16)>>>,
+    }
+
+    impl MockEchoReferenceSink {
+        fn new() -> (Arc<Self>, Arc<StdMutex<Vec<(Vec<u8>, u32, u16)>>>) {
+            let calls = Arc::new(StdMutex::new(Vec::new()));
+            let sink = Arc::new(Self {
+                calls: calls.clone(),
+            });
+            (sink, calls)
+        }
+    }
+
+    #[async_trait]
+    impl EchoReferenceSink for MockEchoReferenceSink {
+        async fn write_render(&self, audio: &[u8], sample_rate: u32, num_channels: u16) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((audio.to_vec(), sample_rate, num_channels));
+        }
+    }
+
+    #[tokio::test]
+    async fn echo_reference_sink_receives_render_audio() {
+        let (echo_sink, echo_calls) = MockEchoReferenceSink::new();
+
+        let params = TransportParams {
+            audio_out_enabled: true,
+            audio_out_channels: 1,
+            audio_out_10ms_chunks: 1,
+            echo_reference_sink: Some(echo_sink),
+            ..Default::default()
+        };
+        let (cb, _, _) = MockCallbacks::new(true);
+        let mut transport = BaseOutputTransport::new(params, cb);
+
+        let (down_tx, mut _down_rx) = mpsc::channel(64);
+        let (up_tx, _up_rx) = mpsc::channel(64);
+        let ctx =
+            ProcessorContext::new(down_tx, up_tx, transport.id(), transport.name().to_string());
+
+        // Start with 16kHz.
+        transport
+            .process_frame(
+                FrameEnvelope::new(Frame::Start(StartFrame {
+                    audio_out_sample_rate: 16000,
+                    ..Default::default()
+                })),
+                Direction::Downstream,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        transport.set_transport_ready().await;
+
+        // Send exactly one 10ms TTS audio frame (160 mono samples = 320 bytes).
+        let samples: Vec<i16> = (0..160).map(|i| (i * 100) as i16).collect();
+        let audio_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        transport
+            .process_frame(
+                FrameEnvelope::new(make_tts_audio(&samples, 16000)),
+                Direction::Downstream,
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Give the audio task time to process.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The echo reference sink should have been called with the audio data.
+        let calls = echo_calls.lock().unwrap();
+        assert!(!calls.is_empty(), "Echo reference sink should be called");
+        // Verify first call has correct sample rate and channel count.
+        assert_eq!(calls[0].1, 16000, "Sample rate should be 16000");
+        assert_eq!(calls[0].2, 1, "Num channels should be 1");
+        // Verify the audio data matches (single 10ms chunk).
+        assert_eq!(calls[0].0, audio_bytes, "Audio data should match");
 
         transport.cancel().await;
     }

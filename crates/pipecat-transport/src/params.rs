@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
+use pipecat_audio::echo::EchoReferenceSink;
 use pipecat_audio::filter::AudioFilter;
 use pipecat_audio::mixer::AudioMixer;
 use pipecat_audio::resampler::AudioResampler;
@@ -38,6 +40,10 @@ pub struct TransportParams {
     /// mixer here; destinations not in the map get no mixer.
     pub audio_out_mixer_map: HashMap<String, Box<dyn AudioMixer>>,
     pub audio_out_resampler: Option<Box<dyn AudioResampler>>,
+    /// Echo reference sink for acoustic echo cancellation.
+    /// When set, the output transport feeds speaker audio into this sink
+    /// so an AEC filter on the input side can cancel echoes.
+    pub echo_reference_sink: Option<Arc<dyn EchoReferenceSink>>,
     /// Seconds of silence to send after EndFrame for clean audio teardown.
     pub audio_out_end_silence_secs: u32,
     /// Named audio output destinations (in addition to the default sender).
@@ -78,6 +84,7 @@ impl Default for TransportParams {
             audio_out_mixer: None,
             audio_out_mixer_map: HashMap::new(),
             audio_out_resampler: None,
+            echo_reference_sink: None,
             audio_out_end_silence_secs: 2,
             audio_out_destinations: Vec::new(),
 
@@ -114,6 +121,7 @@ impl fmt::Debug for TransportParams {
             .field("audio_out_mixer", &self.audio_out_mixer.is_some())
             .field("audio_out_mixer_map_len", &self.audio_out_mixer_map.len())
             .field("audio_out_resampler", &self.audio_out_resampler.is_some())
+            .field("echo_reference_sink", &self.echo_reference_sink.is_some())
             .field(
                 "audio_out_end_silence_secs",
                 &self.audio_out_end_silence_secs,

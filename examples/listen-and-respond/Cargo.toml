@@ -8,7 +8,7 @@ publish = false
 pipecat-core = { workspace = true }
 pipecat-pipeline = { workspace = true }
 pipecat-transport = { workspace = true, features = ["cpal"] }
-pipecat-audio = { workspace = true, features = ["silero"] }
+pipecat-audio = { workspace = true, features = ["silero", "aec3"] }
 pipecat-context = { workspace = true }
 pipecat-services = { workspace = true, features = ["whisper"] }
 pipecat-turns = { workspace = true }
