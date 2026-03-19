@@ -83,6 +83,17 @@ pub struct ClaudeCodeSettings {
     /// Path to MCP config file (`--mcp-config`).
     pub mcp_config: Option<PathBuf>,
 
+    /// Disable all MCP servers by passing `--strict-mcp-config` without any
+    /// `--mcp-config`. Default: `true`. Set to `false` if you want MCP servers
+    /// from the user's Claude Code configuration to be available.
+    pub disable_mcp: bool,
+
+    /// Working directory for the `claude` process. Default: system temp dir.
+    /// This prevents the CLI from loading project-level `CLAUDE.md` files
+    /// from the actual working directory. Set to `None` to inherit the
+    /// current process CWD (which will load any `CLAUDE.md` found there).
+    pub cwd: Option<PathBuf>,
+
     /// JSON Schema for structured output (`--json-schema`).
     pub json_schema: Option<serde_json::Value>,
 
@@ -112,12 +123,14 @@ impl ClaudeCodeSettings {
             effort: None,
             tools: None,
             allowed_tools: None,
-            disallowed_tools: None,
+            disallowed_tools: Some(vec!["LSP".into()]),
             append_system_prompt: None,
             max_turns: None,
             permission_mode: None,
             dangerously_skip_permissions: false,
             mcp_config: None,
+            disable_mcp: true,
+            cwd: Some(std::env::temp_dir()),
             json_schema: None,
             claude_path: PathBuf::from("claude"),
             extra_args: Vec::new(),

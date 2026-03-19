@@ -151,6 +151,9 @@ impl ClaudeCodeLLMService {
         if let Some(ref path) = self.settings.mcp_config {
             cmd.arg("--mcp-config").arg(path);
         }
+        if self.settings.disable_mcp && self.settings.mcp_config.is_none() {
+            cmd.arg("--strict-mcp-config");
+        }
 
         // JSON schema
         if let Some(ref schema) = self.settings.json_schema {
@@ -176,6 +179,12 @@ impl ClaudeCodeLLMService {
 
         // The prompt (positional argument, must be last)
         cmd.arg(prompt);
+
+        // Working directory — defaults to temp dir to avoid loading
+        // project-level CLAUDE.md files from the actual CWD.
+        if let Some(ref cwd) = self.settings.cwd {
+            cmd.current_dir(cwd);
+        }
 
         // Configure stdio
         cmd.stdout(Stdio::piped());
