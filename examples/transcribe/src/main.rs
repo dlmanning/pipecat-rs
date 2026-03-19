@@ -3,15 +3,14 @@
 //! Supports file input (WAV, MP3, FLAC, OGG/Vorbis, AAC) or live microphone capture.
 //!
 //! ```text
-//! cargo run -p pipecat-examples --bin transcribe -- recording.wav
-//! cargo run -p pipecat-examples --bin transcribe -- recording.mp3 --play
-//! cargo run -p pipecat-examples --bin transcribe -- --mic
-//! cargo run -p pipecat-examples --bin transcribe -- --mic --device "MacBook Pro Microphone"
-//! cargo run -p pipecat-examples --bin transcribe -- --list-devices
+//! cargo run -p transcribe -- recording.wav
+//! cargo run -p transcribe -- recording.mp3 --play
+//! cargo run -p transcribe -- --mic
+//! cargo run -p transcribe -- --mic --device "MacBook Pro Microphone"
+//! cargo run -p transcribe -- --list-devices
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -23,16 +22,14 @@ use pipecat_core::error::Result;
 use pipecat_core::frame::*;
 use pipecat_core::processor::{FrameProcessor, ProcessorBase, ProcessorContext};
 use pipecat_pipeline::{Pipeline, PipelineParams, PipelineTask};
+use pipecat_services::settings::STTSettings;
+use pipecat_services::whisper::WhisperSTTService;
 use pipecat_transport::local::*;
 use pipecat_transport::{
     AudioPlayer, AudioPlayerConfig, MicInput, MicInputConfig, TransportParams, list_input_devices,
 };
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 const SAMPLE_RATE: u32 = 16000;
-
-/// Pre-speech audio buffer: 1 second at SAMPLE_RATE, mono, 16-bit PCM.
-const PRE_SPEECH_BYTES: usize = SAMPLE_RATE as usize * 2;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -82,73 +79,26 @@ struct Args {
 }
 
 // ---------------------------------------------------------------------------
-// WhisperTranscribeProcessor
+// TranscriptionPrinter — prints TranscriptionFrame text from WhisperSTTService
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct WhisperTranscribeProcessor {
+struct TranscriptionPrinter {
     base: ProcessorBase,
-    whisper_ctx: Arc<WhisperContext>,
-    language: String,
-    /// Rolling 1s pre-speech window; accumulates during speech.
-    audio_buf: Vec<u8>,
-    /// Total audio bytes seen (for timestamp computation).
-    total_bytes: usize,
-    speaking: bool,
-    /// Byte offset where the current segment's buffer begins.
-    segment_start: usize,
     segments: usize,
 }
 
-impl WhisperTranscribeProcessor {
-    fn new(whisper_ctx: Arc<WhisperContext>, language: String) -> Self {
+impl TranscriptionPrinter {
+    fn new() -> Self {
         Self {
-            base: ProcessorBase::new("WhisperTranscribe"),
-            whisper_ctx,
-            language,
-            audio_buf: Vec::new(),
-            total_bytes: 0,
-            speaking: false,
-            segment_start: 0,
+            base: ProcessorBase::new("TranscriptionPrinter"),
             segments: 0,
         }
     }
-
-    fn segments(&self) -> usize {
-        self.segments
-    }
-}
-
-fn transcribe(ctx: &WhisperContext, audio: &[u8], language: &str) -> String {
-    let samples: Vec<f32> = audio
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
-        .collect();
-
-    let mut state = ctx.create_state().expect("failed to create Whisper state");
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(Some(language));
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_no_timestamps(true);
-
-    state
-        .full(params, &samples)
-        .expect("Whisper inference failed");
-
-    let mut text = String::new();
-    for seg in state.as_iter() {
-        if let Ok(t) = seg.to_str() {
-            text.push_str(t);
-        }
-    }
-    text.trim().to_string()
 }
 
 #[async_trait]
-impl FrameProcessor for WhisperTranscribeProcessor {
+impl FrameProcessor for TranscriptionPrinter {
     fn name(&self) -> &str {
         self.base.name()
     }
@@ -162,44 +112,12 @@ impl FrameProcessor for WhisperTranscribeProcessor {
         direction: Direction,
         ctx: &ProcessorContext,
     ) -> Result<()> {
-        match &envelope.frame {
-            Frame::InputAudioRaw(audio) => {
-                self.total_bytes += audio.audio.len();
-                self.audio_buf.extend_from_slice(&audio.audio);
-
-                // Keep only the last 1s when not speaking.
-                if !self.speaking && self.audio_buf.len() > PRE_SPEECH_BYTES {
-                    let excess = self.audio_buf.len() - PRE_SPEECH_BYTES;
-                    self.audio_buf.drain(..excess);
-                }
-            }
-
-            Frame::VADUserStartedSpeaking(_) => {
-                self.speaking = true;
-                self.segment_start = self.total_bytes - self.audio_buf.len();
-            }
-
-            Frame::VADUserStoppedSpeaking(_) => {
-                self.speaking = false;
-                let start_secs = self.segment_start as f64 / (SAMPLE_RATE as f64 * 2.0);
-                let audio_data = std::mem::take(&mut self.audio_buf);
-                let wctx = self.whisper_ctx.clone();
-                let lang = self.language.clone();
-
-                let text =
-                    tokio::task::spawn_blocking(move || transcribe(&wctx, &audio_data, &lang))
-                        .await
-                        .unwrap();
-
-                if !text.is_empty() {
-                    self.segments += 1;
-                    println!("[{start_secs:6.1}s] \"{text}\"");
-                }
-            }
-
-            _ => {}
+        if let Frame::Transcription(t) = &envelope.frame
+            && !t.text.is_empty()
+        {
+            self.segments += 1;
+            println!("\"{}\"", t.text);
         }
-
         ctx.push_frame(envelope, direction).await
     }
 }
@@ -260,7 +178,7 @@ fn build_file_input(path: &PathBuf, realtime: bool) -> Box<dyn FrameProcessor> {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    whisper_rs::install_logging_hooks();
+    pipecat_services::whisper::suppress_stderr_logging();
     let args = Args::parse();
 
     // --list-devices: print and exit (no model load needed).
@@ -284,16 +202,20 @@ fn main() {
         .expect("failed to download/find Whisper model");
 
     eprintln!("Loading Whisper model: {}", model_path.display());
-    let whisper_ctx = Arc::new(
-        WhisperContext::new_with_params(
-            model_path.to_str().unwrap(),
-            WhisperContextParameters::default(),
-        )
-        .expect("failed to load Whisper model"),
-    );
+
+    let mut stt = WhisperSTTService::new(
+        &model_path,
+        STTSettings {
+            language: Some(args.language),
+            ..Default::default()
+        },
+    )
+    .expect("failed to create WhisperSTTService");
+    stt.set_audio_passthrough(false);
+
     eprintln!("Model loaded.\n");
 
-    // Build pipeline: input → VAD → [optional playback] → whisper.
+    // Build pipeline: input → VAD → [optional playback] → STT → printer.
     let realtime = args.realtime || args.play;
     if args.play && !args.realtime {
         eprintln!("Note: --play forces real-time pacing");
@@ -315,18 +237,14 @@ fn main() {
         },
     ));
 
-    let whisper = WhisperTranscribeProcessor::new(whisper_ctx, args.language);
-
-    // We need the segment count after the pipeline runs, but the processor is
-    // moved into the pipeline. Use a shared pointer to read it back out.
-    let segment_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let segment_count_ref = segment_count.clone();
+    let printer = TranscriptionPrinter::new();
 
     let mut processors: Vec<Box<dyn FrameProcessor>> = vec![input, Box::new(vad)];
     if args.play {
         processors.push(Box::new(AudioPlayer::new(AudioPlayerConfig::default())));
     }
-    processors.push(Box::new(SegmentCounter(whisper, segment_count)));
+    processors.push(Box::new(stt));
+    processors.push(Box::new(printer));
 
     let pipeline = Pipeline::new(processors);
     let mut task = PipelineTask::new(
@@ -345,38 +263,5 @@ fn main() {
         .block_on(async { task.run().await.unwrap() });
 
     let elapsed = start.elapsed().as_secs_f64();
-    let count = segment_count_ref.load(std::sync::atomic::Ordering::Relaxed);
-    eprintln!("\n{count} segments in {elapsed:.2}s");
-}
-
-// ---------------------------------------------------------------------------
-// SegmentCounter — thin wrapper to expose segment count after pipeline ends
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct SegmentCounter(
-    WhisperTranscribeProcessor,
-    Arc<std::sync::atomic::AtomicUsize>,
-);
-
-#[async_trait]
-impl FrameProcessor for SegmentCounter {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    fn id(&self) -> u64 {
-        self.0.id()
-    }
-
-    async fn process_frame(
-        &mut self,
-        envelope: FrameEnvelope,
-        direction: Direction,
-        ctx: &ProcessorContext,
-    ) -> Result<()> {
-        self.0.process_frame(envelope, direction, ctx).await?;
-        self.1
-            .store(self.0.segments(), std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
+    eprintln!("\nDone in {elapsed:.2}s");
 }

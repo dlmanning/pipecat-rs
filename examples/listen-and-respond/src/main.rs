@@ -428,7 +428,7 @@ fn main() {
     let mic = MicInput::new(
         TransportParams {
             audio_in_enabled: true,
-            // audio_in_filter: Some(aec_filter),
+            audio_in_filter: Some(aec_filter),
             audio_in_resampler: Some(Box::new(LinearResampler::new())),
             ..Default::default()
         },

@@ -165,19 +165,31 @@ impl FrameProcessor for WhisperSTTService {
                 }
             }
 
-            Frame::VADUserStartedSpeaking(_) | Frame::UserStartedSpeaking(_) => {
+            Frame::VADUserStartedSpeaking(_) => {
                 self.state.user_speaking = true;
                 ctx.push_frame(envelope, direction).await?;
             }
 
-            Frame::VADUserStoppedSpeaking(_) | Frame::UserStoppedSpeaking(_) => {
+            Frame::VADUserStoppedSpeaking(_) => {
                 self.state.user_speaking = false;
                 self.transcribe(ctx).await?;
                 ctx.push_frame(envelope, direction).await?;
             }
 
+            // UserStartedSpeaking/UserStoppedSpeaking are informational
+            // frames from the turn controller — not transcription triggers.
+            // Only VAD events drive buffer lifecycle (matching Python's
+            // stt_service.py behavior).
+            Frame::UserStartedSpeaking(_) | Frame::UserStoppedSpeaking(_) => {
+                ctx.push_frame(envelope, direction).await?;
+            }
+
             Frame::Interruption(_) => {
-                self.audio_buf.clear();
+                // Don't clear audio_buf — InterruptionFrame is broadcast both
+                // upstream and downstream by the UserAgg when the user starts
+                // speaking. Clearing here would wipe the pre-speech buffer.
+                // Buffer management is driven by VAD events only (matching
+                // Python's stt_service.py behavior).
                 self.state.base.metrics.reset();
                 ctx.push_frame(envelope, direction).await?;
             }
